@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readManyFilesTool,
+  runShellTool,
   sandboxShellArgs,
   sandboxShellEnvironment,
 } from "./pi-tools.js";
@@ -26,7 +27,11 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  sandboxShellEnvironment({ PATH: "/bin", SSH_AUTH_SOCK: "/private/agent.sock" }),
+  sandboxShellEnvironment({
+    PATH: "/bin",
+    SSH_AUTH_SOCK: "/private/agent.sock",
+    ZZZ_DEVSPACE_SECURITY_API_KEY: "fake-security-fixture",
+  }),
   { PATH: "/bin" },
 );
 
@@ -35,6 +40,21 @@ try {
   mkdirSync(join(root, "nested"));
   writeFileSync(join(root, "a.txt"), "alpha\n");
   writeFileSync(join(root, "nested", "b.txt"), "beta\n");
+
+  process.env.ZZZ_DEVSPACE_SECURITY_API_KEY = "fake-security-fixture";
+  try {
+    const shell = await runShellTool(
+      {
+        command: `${JSON.stringify(process.execPath)} -e "console.log(process.env.ZZZ_DEVSPACE_SECURITY_API_KEY || 'missing')"`,
+        timeout: 10,
+      },
+      { cwd: root, root },
+    );
+    assert.equal(shell.isError, undefined);
+    assert.match(shell.content[0]?.type === "text" ? shell.content[0].text : "", /missing/);
+  } finally {
+    delete process.env.ZZZ_DEVSPACE_SECURITY_API_KEY;
+  }
 
   const result = await readManyFilesTool(
     {

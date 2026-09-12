@@ -340,8 +340,16 @@ export async function isSamePatchFile(
   }
 }
 
-export async function applyPatch(root: string, patch: string): Promise<ApplyPatchResult> {
+export async function applyPatch(
+  root: string,
+  patch: string,
+  options: { assertPathAllowed?: (path: string) => void } = {},
+): Promise<ApplyPatchResult> {
   const actions = parsePatch(patch);
+  for (const action of actions) {
+    options.assertPathAllowed?.(action.path);
+    if (action.kind === "update" && action.moveTo) options.assertPathAllowed?.(action.moveTo);
+  }
   const results: AppliedPatchFile[] = [];
   const patches: string[] = [];
   const staged = new Map<string, StagedTextFile>();

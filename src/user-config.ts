@@ -23,6 +23,9 @@ export interface DevspaceUserConfig {
   agentDir?: string;
   subagents?: StoredSubagentsConfig;
   shellSandbox?: string | null;
+  shellEnvAllowlist?: string[];
+  agentEnvAllowlist?: string[];
+  dangerouslyAllowShellInSecretWorkspaces?: boolean;
   workspaceAliases?: Record<string, string>;
   sshAdminPolicy?: "direct" | "timed-unlock";
   sshHosts?: Array<{

@@ -47,6 +47,57 @@ test("Jason extension tools compose with upstream full and codex tool surfaces",
   }
 });
 
+test("MCP tools do not expose protected workspace secrets", async (t) => {
+  const context = await fixture(t, { toolMode: "full" });
+  const opened = structuredContent(await callOpen(context.client, context.project, "security-chat"));
+  const workspaceId = String(opened.workspaceId);
+  await writeFile(join(context.project, ".env"), "FAKE_MCP_SECRET=not-real\n");
+
+  const blockedRead = await context.client.callTool({
+    name: "read",
+    arguments: { workspaceId, path: ".env" },
+  });
+  assert.equal(blockedRead.isError, true);
+  assert.match(responseText(blockedRead), /Protected workspace secret path/);
+  assert.doesNotMatch(responseText(blockedRead), /FAKE_MCP_SECRET|not-real/);
+
+  const grep = await context.client.callTool({
+    name: "grep",
+    arguments: { workspaceId, pattern: "FAKE_MCP_SECRET" },
+  });
+  assert.doesNotMatch(responseText(grep), /FAKE_MCP_SECRET|not-real/);
+
+  const blockedShell = await context.client.callTool({
+    name: "bash",
+    arguments: { workspaceId, command: "cat .env" },
+  });
+  assert.equal(blockedShell.isError, true);
+  assert.match(responseText(blockedShell), /Shell is disabled in workspaces containing protected secret files/);
+  assert.doesNotMatch(responseText(blockedShell), /FAKE_MCP_SECRET|not-real/);
+});
+
+test("Codex apply_patch cannot modify protected workspace secret paths", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = structuredContent(await callOpen(context.client, context.project, "security-codex"));
+  const workspaceId = String(opened.workspaceId);
+
+  const blockedPatch = await context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspaceId,
+      patch: [
+        "*** Begin Patch",
+        "*** Add File: .env",
+        "+FAKE_PATCH_SECRET=not-real",
+        "*** End Patch",
+      ].join("\n"),
+    },
+  });
+  assert.equal(blockedPatch.isError, true);
+  assert.match(responseText(blockedPatch), /Protected workspace secret path/);
+  assert.doesNotMatch(responseText(blockedPatch), /FAKE_PATCH_SECRET|not-real/);
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const providerNote = "available";
   const context = await fixture(t, {

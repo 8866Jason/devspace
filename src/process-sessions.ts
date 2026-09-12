@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
+import { sanitizeExecutionEnvironment } from "./security.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_INTERACTIVE_YIELD_MS = 250;
@@ -18,6 +19,7 @@ export interface StartCommandInput {
   cwd: string;
   workspaceRoot?: string;
   sandbox?: string;
+  envAllowlist?: readonly string[];
   tty?: boolean;
   columns?: number;
   rows?: number;
@@ -92,10 +94,12 @@ function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
   sandbox?: string;
+  envAllowlist?: readonly string[];
 }): Record<string, string> {
   const environment: Record<string, string> = {
     ...Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+      Object.entries(sanitizeExecutionEnvironment(process.env, input?.envAllowlist))
+        .filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
     NO_COLOR: "1",
     TERM: "dumb",
@@ -108,7 +112,6 @@ function processEnvironment(input?: {
     ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
     ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
   };
-  if (input?.sandbox) delete environment.SSH_AUTH_SOCK;
   return environment;
 }
 
@@ -350,6 +353,7 @@ export class ProcessSessionManager {
             workspaceId: input.workspaceId,
             workspaceRoot: input.workspaceRoot,
             sandbox: input.sandbox,
+            envAllowlist: input.envAllowlist,
           }),
           stdio: "pipe",
           windowsHide: true,
@@ -360,6 +364,7 @@ export class ProcessSessionManager {
           env: processEnvironment({
             workspaceId: input.workspaceId,
             workspaceRoot: input.workspaceRoot,
+            envAllowlist: input.envAllowlist,
           }),
           stdio: "pipe",
           windowsHide: true,
@@ -401,6 +406,7 @@ export class ProcessSessionManager {
           workspaceId: input.workspaceId,
           workspaceRoot: input.workspaceRoot,
           sandbox: input.sandbox,
+          envAllowlist: input.envAllowlist,
         }),
         name: "xterm-256color",
         cols: session.columns,

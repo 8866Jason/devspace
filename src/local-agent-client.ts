@@ -49,6 +49,7 @@ import type {
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
 import type { LocalAgentRecord, LocalAgentWorkspaceScope } from "./local-agent-store.js";
+import { sanitizeExecutionEnvironment } from "./security.js";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 8_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -67,6 +68,7 @@ export interface LocalAgentClientOptions {
   requestTimeoutMs?: number;
   spawnDaemon?: () => void;
   endpoint?: string;
+  agentEnvAllowlist?: readonly string[];
 }
 
 export class LocalAgentClient {
@@ -84,7 +86,9 @@ export class LocalAgentClient {
     this.endpoint = options.endpoint ?? this.paths.endpoint;
     this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    this.spawnDaemon = options.spawnDaemon ?? (() => spawnLocalAgentDaemon(options.stateDir));
+    this.spawnDaemon = options.spawnDaemon ?? (() =>
+      spawnLocalAgentDaemon(options.stateDir, process.env, options.agentEnvAllowlist)
+    );
   }
 
   async run(
@@ -404,17 +408,57 @@ export class LocalAgentClient {
   }
 }
 
-export function createLocalAgentClient(config: Pick<ServerConfig, "stateDir">): LocalAgentClient {
-  return new LocalAgentClient({ stateDir: config.stateDir });
+export function createLocalAgentClient(
+  config: Pick<ServerConfig, "stateDir" | "agentEnvAllowlist">,
+): LocalAgentClient {
+  return new LocalAgentClient({
+    stateDir: config.stateDir,
+    agentEnvAllowlist: config.agentEnvAllowlist,
+  });
 }
 
-export function spawnLocalAgentDaemon(stateDir: string, env: NodeJS.ProcessEnv = process.env): void {
+const SAFE_DAEMON_DEVSPACE_ENV_NAMES = [
+  "DEVSPACE_CONFIG_DIR",
+  "DEVSPACE_ALLOWED_ROOTS",
+  "DEVSPACE_WORKTREE_ROOT",
+  "DEVSPACE_AGENT_DIR",
+  "DEVSPACE_SKILL_PATHS",
+  "DEVSPACE_SUBAGENTS",
+  "DEVSPACE_AGENTD_IDLE_TIMEOUT_MS",
+  "DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS",
+] as const;
+
+export function localAgentDaemonEnvironment(
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  agentEnvAllowlist: readonly string[] = [],
+): NodeJS.ProcessEnv {
+  const sanitized = sanitizeExecutionEnvironment(env, [
+    ...SAFE_DAEMON_DEVSPACE_ENV_NAMES,
+    ...agentEnvAllowlist,
+  ]);
+  return {
+    ...sanitized,
+    DEVSPACE_STATE_DIR: stateDir,
+    // The daemon loads shared configuration but does not expose an OAuth server.
+    // Supply a synthetic bootstrap value so the real MCP owner credential never
+    // needs to cross the daemon process boundary.
+    DEVSPACE_OAUTH_OWNER_TOKEN: "local-agent-daemon-owner-not-used",
+    DEVSPACE_PUBLIC_BASE_URL: "http://127.0.0.1:7676",
+  };
+}
+
+export function spawnLocalAgentDaemon(
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  agentEnvAllowlist: readonly string[] = [],
+): void {
   const entrypoint = resolveDaemonEntrypoint();
   const child = spawn(process.execPath, [...daemonExecArgv(process.execArgv), entrypoint], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
-    env: { ...env, DEVSPACE_STATE_DIR: stateDir },
+    env: localAgentDaemonEnvironment(stateDir, env, agentEnvAllowlist),
   });
   child.unref();
 }

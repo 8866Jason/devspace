@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Panic, Result, type Result as BetterResult } from "better-result";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { LocalAgentManager } from "./local-agent-manager.js";
@@ -153,6 +153,30 @@ await assert.rejects(
   (error: unknown) => Panic.is(error) && error.cause instanceof TypeError,
 );
 await defectManager.close();
+
+const secretRoot = await mkdtemp(join(tmpdir(), "devspace-secret-agent-manager-test-"));
+await writeFile(join(secretRoot, ".env"), "FAKE_TEST_SECRET=not-real\n");
+const secretManager = new LocalAgentManager({
+  store: new LocalAgentStore(join(secretRoot, ".state")),
+  drivers: [driver],
+  pool: new LocalAgentRuntimePool(),
+  loadProfiles: async () => [profile],
+  allowedRoots: [secretRoot],
+  subagents,
+});
+const secretWorkspaceStart = await secretManager.start({
+  target: "reviewer",
+  prompt: "must not run",
+  workspaceId: "ws_secret",
+  workspaceRoot: secretRoot,
+});
+assert.equal(secretWorkspaceStart.isErr(), true);
+if (secretWorkspaceStart.isErr()) {
+  assert.equal(secretWorkspaceStart.error.code, "WORKSPACE_SECRETS_PRESENT");
+  assert.doesNotMatch(secretWorkspaceStart.error.message, /\.env|FAKE_TEST_SECRET/);
+}
+await secretManager.close();
+await rm(secretRoot, { recursive: true, force: true });
 
 const outside = await manager.start({
   target: "reviewer",

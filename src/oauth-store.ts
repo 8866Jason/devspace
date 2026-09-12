@@ -33,8 +33,10 @@ function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boole
     return false;
   }
 
-  if (["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) return true;
-  return allowedHosts.includes(parsed.hostname);
+  if (parsed.username || parsed.password || parsed.hash) return false;
+  const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
+  if (loopback) return parsed.protocol === "http:" || parsed.protocol === "https:";
+  return parsed.protocol === "https:" && allowedHosts.includes(parsed.hostname);
 }
 
 export class SqliteOAuthStore {
@@ -56,9 +58,16 @@ export class SqliteOAuthStore {
   registerClient(
     client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
     allowedRedirectHosts: string[],
+    maxClients = 256,
   ): OAuthClientInformationFull {
     if (!client.redirect_uris.every((uri) => redirectHostAllowed(String(uri), allowedRedirectHosts))) {
       throw new InvalidRequestError("Client redirect_uri is not allowed for this DevSpace server");
+    }
+    const count = this.database.sqlite
+      .prepare("select count(*) as count from oauth_clients")
+      .get() as { count: number };
+    if (count.count >= maxClients) {
+      throw new InvalidRequestError("OAuth client registration limit reached for this DevSpace server");
     }
 
     const now = Math.floor(Date.now() / 1000);
@@ -191,6 +200,7 @@ export class SqliteOAuthClientsStore implements OAuthRegisteredClientsStore {
   constructor(
     private readonly store: SqliteOAuthStore,
     private readonly allowedRedirectHosts: string[],
+    private readonly maxClients = 256,
   ) {}
 
   getClient(clientId: string): OAuthClientInformationFull | undefined {
@@ -200,7 +210,7 @@ export class SqliteOAuthClientsStore implements OAuthRegisteredClientsStore {
   registerClient(
     client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
   ): OAuthClientInformationFull {
-    return this.store.registerClient(client, this.allowedRedirectHosts);
+    return this.store.registerClient(client, this.allowedRedirectHosts, this.maxClients);
   }
 }
 

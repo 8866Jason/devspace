@@ -11,8 +11,13 @@ import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 
-const config = loadConfig();
 const DEFAULT_DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
+const daemonIdleShutdownMs = parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS);
+const daemonShutdownTimeoutMs = parseShutdownTimeoutMs(process.env.DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS);
+const config = loadConfig();
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("DEVSPACE_")) delete process.env[key];
+}
 const paths = localAgentDaemonPaths(config.stateDir);
 const log = (
   level: "info" | "warn" | "error",
@@ -38,7 +43,7 @@ const daemon = new LocalAgentDaemon({
     if (reconciled.isErr()) throw reconciled.error;
   },
   onClosed: () => { if (!shuttingDown) process.exit(0); },
-  idleShutdownMs: parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS),
+  idleShutdownMs: daemonIdleShutdownMs,
 });
 
 let shuttingDown = false;
@@ -53,7 +58,7 @@ const shutdown = () => {
     // Active records intentionally remain durable. The next daemon startup
     // reconciles them to error while preserving provider continuation data.
     process.exit(1);
-  }, parseShutdownTimeoutMs(process.env.DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS));
+  }, daemonShutdownTimeoutMs);
   forceTimer.unref();
   void daemon.close().finally(() => process.exit(0));
 };

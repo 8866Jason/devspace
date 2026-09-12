@@ -18,6 +18,11 @@ import {
   resolveAllowedPath,
 } from "./roots.js";
 import {
+  assertWorkspacePathNotProtected,
+  findProtectedWorkspacePath,
+  isProtectedWorkspacePath,
+} from "./security.js";
+import {
   loadWorkspaceSkills,
   markSkillActivated,
   resolveSkillReadPath,
@@ -434,8 +439,13 @@ export class WorkspaceRegistry {
       throw new Error(`Path is outside workspace root: ${inputPath}`);
     }
     this.assertNotProtectedRuntimePath(absolutePath, inputPath);
+    assertWorkspacePathNotProtected(absolutePath, workspace.root, inputPath);
 
     return absolutePath;
+  }
+
+  isProtectedWorkspacePath(workspace: Workspace, inputPath: string): boolean {
+    return isProtectedWorkspacePath(resolve(workspace.root, inputPath), workspace.root);
   }
 
   resolveMutationPath(workspace: Workspace, inputPath: string): string {
@@ -469,6 +479,16 @@ export class WorkspaceRegistry {
   markReadPathLoaded(workspace: Workspace, readPath: WorkspaceReadPath): void {
     if (readPath.skillRead?.isSkillFile) {
       markSkillActivated(workspace.activatedSkillDirs, readPath.skillRead.skill);
+    }
+  }
+
+  async assertShellWorkspaceSafe(workspace: Workspace): Promise<void> {
+    this.assertShellAllowed(workspace);
+    if (this.config.dangerouslyAllowShellInSecretWorkspaces) return;
+    if (await findProtectedWorkspacePath(workspace.root)) {
+      throw new AccessDeniedError(
+        "Shell is disabled in workspaces containing protected secret files. Use an isolated worktree without local secrets, or explicitly enable the break-glass override for this trusted workflow.",
+      );
     }
   }
 

@@ -41,7 +41,11 @@ npx @waishnav/devspace ssh lock-admin
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
-| `DEVSPACE_SHELL_SANDBOX` | Optional existing Docker Sandbox microVM name. When set, `bash` and Codex-mode `exec_command` run through `sbx exec`; the host SSH agent socket is not forwarded. |
+| `DEVSPACE_SHELL_SANDBOX` | Existing Docker Sandbox microVM name. Public DevSpace endpoints require this by default. `bash` and Codex-mode `exec_command` run through `sbx exec`; the host SSH agent socket is never forwarded. |
+| `DEVSPACE_SHELL_ENV_ALLOWLIST` | Comma-separated environment-variable names explicitly allowed into shell processes. Sensitive names are removed by default. `DEVSPACE_OAUTH_OWNER_TOKEN` and `SSH_AUTH_SOCK` are never forwarded. |
+| `DEVSPACE_AGENT_ENV_ALLOWLIST` | Comma-separated sensitive provider environment-variable names explicitly allowed into local-agent processes. Empty by default. |
+| `DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL` | Break-glass override that permits a public endpoint without `shellSandbox`. Keep off. |
+| `DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_SECRET_WORKSPACES` | Break-glass override that permits shell access in a workspace containing protected project secret files. Keep off. |
 | `DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS` | Owner-only escape hatch for broad workspaces containing DevSpace credential/state paths. Defaults to off. |
 
 ## Native Artifact Download
@@ -78,7 +82,7 @@ for the supported connector shape and security boundaries.
 
 ## OAuth
 
-DevSpace uses a single-user OAuth approval flow.
+DevSpace uses a single-user OAuth approval flow. Non-loopback OAuth redirect URIs must use HTTPS; loopback redirects may use HTTP for local clients. Dynamic client registration is capped and OAuth POST endpoints are rate-limited in memory to reduce brute-force and state-exhaustion risk.
 
 | Variable | Default |
 | --- | --- |
@@ -113,7 +117,10 @@ Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
 `node-pty` dependency; `write_stdin` can send input, poll output, and resize PTY
 sessions. When `DEVSPACE_SHELL_SANDBOX` is configured, both pipe and PTY process
-sessions are launched through that sandbox.
+sessions are launched through that sandbox. A non-loopback/public
+`DEVSPACE_PUBLIC_BASE_URL` is rejected at startup unless a sandbox is configured
+(or the explicit dangerous override is set). Shell child environments are
+sanitized before launch.
 
 `read_many` accepts up to 64 files per call. `move` performs no-overwrite
 same-workspace file or directory renames and rejects `.git`, credential/state,
@@ -281,10 +288,10 @@ into `config.json`, source files, tests, Git commits, or pull requests.
 
 The `ssh` MCP tool accepts only configured names or aliases and rejects arbitrary
 hosts. It uses OpenSSH with batch authentication. Keep passphrases in the system
-SSH agent or Keychain instead of DevSpace configuration. With
-`sshAdminPolicy: "timed-unlock"`, admin-tier aliases additionally require a
+SSH agent or Keychain instead of DevSpace configuration. `sshAdminPolicy` defaults to `"timed-unlock"`. Admin-tier aliases require a
 short local unlock performed interactively with `devspace ssh unlock-admin`.
-The unlock record is owner-local state and must never be committed.
+Using `"direct"` is an explicit reduction in protection. The unlock record is
+owner-local state and must never be committed.
 
 While the server is running, changes to `sshHosts` in `config.json` are validated
 and hot-reloaded. An invalid edit keeps the last known-good host list.
@@ -296,6 +303,19 @@ matched secret value. CI runs this check on every pull request. DevSpace also
 ignores common local auth/token/private-key filenames. `auth.json`, SQLite state,
 SSH private keys, temporary passwords, and admin-unlock state belong outside the
 repository.
+
+Model-facing workspace tools additionally reject common protected secret paths,
+including `.env` variants, `wp-config.php`, `.npmrc`, `.netrc`, common private-key
+files/directories, and local trigger-history state. Template files such as
+`.env.example` remain readable. Broad `grep`, Codex `apply_patch`, aggregate
+change review, and direct reads/writes all apply the same boundary.
+
+Arbitrary shell commands cannot be made safe merely by hiding a file tool. By
+default, DevSpace therefore refuses `bash`/`exec_command` when the workspace
+contains protected project secrets. Local subagents are likewise refused in
+such a workspace; use an isolated Git worktree without local secret files.
+The shell break-glass setting exists for trusted workflows that knowingly need
+access to a secret-bearing checkout.
 
 ## Logging
 
@@ -312,7 +332,8 @@ repository.
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
-previews in logs.
+previews in logs. Log fields pass through credential redaction, and failed tool
+calls do not persist raw stdout/stderr previews.
 
 ## Env-Only Example
 

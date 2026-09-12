@@ -41,6 +41,7 @@ import type {
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
 import type { LocalAgentRecord, LocalAgentWorkspaceScope } from "./local-agent-store.js";
+import { sanitizeLogFields } from "./security.js";
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const DEFAULT_DAEMON_IDLE_SHUTDOWN_MS = 30_000;
@@ -408,7 +409,7 @@ export function writeLocalAgentDaemonLog(
 ): void {
   try {
     ensureLocalAgentDaemonStateDir(paths.stateDir);
-    appendFileSync(paths.logPath, `${JSON.stringify({ at: new Date().toISOString(), level, event, ...fields })}\n`, { mode: 0o600 });
+    appendFileSync(paths.logPath, `${JSON.stringify({ at: new Date().toISOString(), level, event, ...sanitizeLogFields(fields) })}\n`, { mode: 0o600 });
     chmodSync(paths.logPath, 0o600);
   } catch {
     // Diagnostics must never break agent execution or shutdown.

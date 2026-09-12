@@ -138,6 +138,53 @@ test("workspace paths outside the allowed roots are rejected", async (t) => {
   );
 });
 
+test("workspace secret paths are denied while template files remain readable", async (t) => {
+  const context = await fixture(t);
+  const opened = await context.registry.openWorkspace(context.root);
+  await writeFile(join(context.root, ".env"), "FAKE_SECRET=not-real\n");
+  await writeFile(join(context.root, ".env.example"), "EXAMPLE=value\n");
+  await writeFile(join(context.root, "wp-config.php"), "<?php // fake secret fixture\n");
+
+  assert.throws(
+    () => context.registry.resolvePath(opened.workspace, ".env"),
+    /Protected workspace secret path/,
+  );
+  assert.throws(
+    () => context.registry.resolvePath(opened.workspace, "wp-config.php"),
+    /Protected workspace secret path/,
+  );
+  assert.equal(
+    context.registry.resolvePath(opened.workspace, ".env.example"),
+    join(context.root, ".env.example"),
+  );
+  await assert.rejects(
+    () => context.registry.movePath(opened.workspace, ".env", "moved.env"),
+    /Protected workspace secret path/,
+  );
+  await assert.rejects(
+    () => context.registry.movePath(opened.workspace, "nested/file.txt", ".env.local"),
+    /Protected workspace secret path/,
+  );
+  const shellConfig = {
+    ...context.config,
+    stateDir: join(context.outsideRoot, "shell-state"),
+    sshAdminUnlockPath: join(context.outsideRoot, "shell-config", "ssh-admin-unlock.json"),
+  };
+  const shellRegistry = new WorkspaceRegistry(shellConfig);
+  const shellWorkspace = await shellRegistry.openWorkspace(context.root);
+  await assert.rejects(
+    () => shellRegistry.assertShellWorkspaceSafe(shellWorkspace.workspace),
+    /Shell is disabled in workspaces containing protected secret files/,
+  );
+
+  const breakGlassRegistry = new WorkspaceRegistry({
+    ...shellConfig,
+    dangerouslyAllowShellInSecretWorkspaces: true,
+  });
+  const breakGlassWorkspace = await breakGlassRegistry.openWorkspace(context.root);
+  await assert.doesNotReject(() => breakGlassRegistry.assertShellWorkspaceSafe(breakGlassWorkspace.workspace));
+});
+
 test("workspace aliases resolve before normal workspace handling", async (t) => {
   const context = await fixture(t);
   const aliasConfig = loadConfig({
@@ -219,6 +266,7 @@ test("a symlinked allowed root preserves checkout and worktree path behavior", {
   await createGitProject(context.root);
 
   const aliasConfig = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(context.outsideRoot, "alias-config"),
     DEVSPACE_ALLOWED_ROOTS: aliasRoot,
     DEVSPACE_WORKTREE_ROOT: join(aliasRoot, ".devspace", "alias-worktrees"),
     DEVSPACE_AGENT_DIR: context.agentDir,

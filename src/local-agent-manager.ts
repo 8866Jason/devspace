@@ -31,6 +31,7 @@ import {
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { assertAllowedPath } from "./roots.js";
+import { findProtectedWorkspacePath } from "./security.js";
 import {
   isSubagentProviderEnabled,
   type SubagentsConfig,
@@ -114,6 +115,7 @@ export class LocalAgentManager {
         input.workspaceId,
         "start",
       );
+      yield* Result.await(manager.workspaceSecretsResult(workspaceRoot, "start"));
       const profiles = yield* Result.await(manager.loadProfilesResult(workspaceRoot, input.target));
       const target = resolveLocalAgentTarget(
         input.target,
@@ -169,6 +171,7 @@ export class LocalAgentManager {
       const record = yield* manager.store.getByIdResult(agentId);
       if (!record) return Result.err(agentNotFound(agentId));
       yield* manager.agentWorkspaceResult(record, scope, "continue");
+      yield* Result.await(manager.workspaceSecretsResult(record.workspaceRoot, "continue", record.id));
       const profiles = yield* Result.await(manager.loadProfilesResult(record.workspaceRoot, record.profileName));
       yield* manager.profileForRecordResult(record, profiles);
       yield* manager.providerEnabledResult(record.provider, record.profileName, "continue");
@@ -285,6 +288,11 @@ export class LocalAgentManager {
         return;
       }
       const workspaceRoot = authorized.value;
+      const secretCheck = await this.workspaceSecretsResult(workspaceRoot, "run", record.id);
+      if (secretCheck.isErr()) {
+        this.persistRunError(record, secretCheck.error, startedAt);
+        return;
+      }
       const authorizedRecord = workspaceRoot === record.workspaceRoot
         ? record
         : { ...record, workspaceRoot };
@@ -398,6 +406,22 @@ export class LocalAgentManager {
       causeType: safeCauseType("cause" in error ? error.cause : undefined),
       persistenceFailed: persisted.isErr(),
     });
+  }
+
+  private async workspaceSecretsResult(
+    workspaceRoot: string,
+    operation: string,
+    agentId?: string,
+  ): Promise<BetterResult<void, AgentScopeError>> {
+    if (!(await findProtectedWorkspacePath(workspaceRoot))) return Result.ok(undefined);
+    return Result.err(new AgentScopeError({
+      code: "WORKSPACE_SECRETS_PRESENT",
+      agentId,
+      operation,
+      retryable: false,
+      message:
+        "Subagents are disabled for workspaces containing protected secret files. Use an isolated worktree without local secret files.",
+    }));
   }
 
   private buildRunInputResult(

@@ -66,6 +66,28 @@ const environment = await manager.start({
 assert.equal(environment.running, false);
 assert.match(environment.output, /1,dumb,cat,cat,cat,1,workspace-a,\/tmp\/devspace-workspace-a/);
 
+process.env.ZZZ_DEVSPACE_SECURITY_API_KEY = "fake-security-fixture";
+try {
+  const sanitizedEnvironment = await manager.start({
+    workspaceId: "workspace-a",
+    cwd: process.cwd(),
+    command: `${node} -e "console.log(process.env.ZZZ_DEVSPACE_SECURITY_API_KEY || 'missing')"`,
+    yieldTimeMs: 2_000,
+  });
+  assert.match(sanitizedEnvironment.output, /missing/);
+
+  const explicitlyAllowedEnvironment = await manager.start({
+    workspaceId: "workspace-a",
+    cwd: process.cwd(),
+    command: `${node} -e "console.log(process.env.ZZZ_DEVSPACE_SECURITY_API_KEY || 'missing')"`,
+    envAllowlist: ["ZZZ_DEVSPACE_SECURITY_API_KEY"],
+    yieldTimeMs: 2_000,
+  });
+  assert.match(explicitlyAllowedEnvironment.output, /fake-security-fixture/);
+} finally {
+  delete process.env.ZZZ_DEVSPACE_SECURITY_API_KEY;
+}
+
 const background = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

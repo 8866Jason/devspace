@@ -178,7 +178,7 @@ export async function runSshTool(
       const configured = normalizedHosts.flatMap((entry) => [entry.name, ...(entry.aliases ?? [])]).join(", ");
       throw new Error(`SSH host is not configured: ${input.host}. Configured hosts: ${configured}`);
     }
-    if (host.tier === "admin" && (security.adminPolicy ?? "direct") === "timed-unlock") {
+    if (host.tier === "admin" && (security.adminPolicy ?? "timed-unlock") === "timed-unlock") {
       const status = security.adminUnlockPath
         ? sshAdminUnlockStatus(security.adminUnlockPath)
         : { unlocked: false };

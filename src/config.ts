@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
+import { parseEnvironmentAllowlist } from "./security.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { normalizeSshHosts, type SshAdminPolicy, type SshHostConfig } from "./ssh-tool.js";
@@ -34,6 +35,10 @@ export interface ServerConfig {
   agentDir: string;
   workspaceAliases: Record<string, string>;
   shellSandbox?: string;
+  shellEnvAllowlist: string[];
+  agentEnvAllowlist: string[];
+  dangerouslyAllowUnsandboxedPublicShell: boolean;
+  dangerouslyAllowShellInSecretWorkspaces: boolean;
   sshHosts: SshHostConfig[];
   sshAdminPolicy: SshAdminPolicy;
   sshAdminUnlockPath: string;
@@ -151,8 +156,8 @@ function parseShellSandbox(value: string | undefined): string | undefined {
 }
 
 function parseSshAdminPolicy(value: string | undefined): SshAdminPolicy {
-  if (!value || value === "direct") return "direct";
-  if (value === "timed-unlock") return value;
+  if (!value || value === "timed-unlock") return "timed-unlock";
+  if (value === "direct") return value;
   throw new Error(`Invalid sshAdminPolicy: ${value}`);
 }
 
@@ -252,6 +257,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = parsePublicBaseUrl(
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
+  const shellSandbox =
+    files.config.shellSandbox === null
+      ? undefined
+      : parseShellSandbox(files.config.shellSandbox ?? env.DEVSPACE_SHELL_SANDBOX);
+  const dangerouslyAllowUnsandboxedPublicShell = parseBoolean(
+    env.DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL,
+  );
+  if (!isLoopbackPublicUrl(publicBaseUrl) && !shellSandbox && !dangerouslyAllowUnsandboxedPublicShell) {
+    throw new Error(
+      "A public DevSpace endpoint requires shellSandbox. Set shellSandbox or DEVSPACE_SHELL_SANDBOX; use DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL=1 only as an explicit break-glass override.",
+    );
+  }
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -288,10 +305,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     subagents: resolveSubagentsConfig(files.config.subagents, env),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
     workspaceAliases: parseWorkspaceAliases(files.config.workspaceAliases),
-    shellSandbox:
-      files.config.shellSandbox === null
-        ? undefined
-        : parseShellSandbox(files.config.shellSandbox ?? env.DEVSPACE_SHELL_SANDBOX),
+    shellSandbox,
+    shellEnvAllowlist: parseEnvironmentAllowlist(
+      env.DEVSPACE_SHELL_ENV_ALLOWLIST ?? files.config.shellEnvAllowlist?.join(","),
+    ),
+    agentEnvAllowlist: parseEnvironmentAllowlist(
+      env.DEVSPACE_AGENT_ENV_ALLOWLIST ?? files.config.agentEnvAllowlist?.join(","),
+    ),
+    dangerouslyAllowUnsandboxedPublicShell,
+    dangerouslyAllowShellInSecretWorkspaces:
+      env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_SECRET_WORKSPACES === undefined
+        ? files.config.dangerouslyAllowShellInSecretWorkspaces === true
+        : parseBoolean(env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_SECRET_WORKSPACES),
     sshHosts: normalizeSshHosts(files.config.sshHosts ?? []),
     sshAdminPolicy: parseSshAdminPolicy(files.config.sshAdminPolicy),
     sshAdminUnlockPath: join(files.dir, "ssh-admin-unlock.json"),
@@ -312,6 +337,14 @@ function parsePublicBaseUrl(value: string): string {
   parsed.search = "";
   parsed.pathname = parsed.pathname.replace(/\/+$/, "");
   return parsed.toString().replace(/\/$/, "");
+}
+
+function isLoopbackPublicUrl(value: string): boolean {
+  const hostname = new URL(value).hostname.toLowerCase();
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1"
+    || hostname === "[::1]";
 }
 
 function localPublicBaseUrl(host: string, port: number): string {

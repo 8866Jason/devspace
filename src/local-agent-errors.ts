@@ -37,7 +37,8 @@ export class AgentConflictError extends TaggedError("AgentConflictError")<{
 export type AgentScopeErrorCode =
   | "WORKSPACE_MISMATCH"
   | "WORKSPACE_NOT_ALLOWED"
-  | "WORKSPACE_SCOPE_REQUIRED";
+  | "WORKSPACE_SCOPE_REQUIRED"
+  | "WORKSPACE_SECRETS_PRESENT";
 
 export class AgentScopeError extends TaggedError("AgentScopeError")<{
   code: AgentScopeErrorCode;

@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { sanitizeLogFields } from "./security.js";
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
 export type LogFormat = "json" | "pretty";
@@ -39,7 +40,7 @@ export function logEvent(
     ts: new Date().toISOString(),
     level,
     event,
-    ...fields,
+    ...sanitizeLogFields(fields),
   };
 
   const line = config.format === "pretty" ? formatPretty(entry) : JSON.stringify(entry);

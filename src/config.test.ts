@@ -22,6 +22,11 @@ assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "codex" }).toolMode, "
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "0" }).toolMode, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).toolMode, "minimal");
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
+assert.equal(loadConfig(baseEnv).sshAdminPolicy, "timed-unlock");
+assert.deepEqual(loadConfig(baseEnv).shellEnvAllowlist, []);
+assert.deepEqual(loadConfig(baseEnv).agentEnvAllowlist, []);
+assert.equal(loadConfig(baseEnv).dangerouslyAllowUnsandboxedPublicShell, false);
+assert.equal(loadConfig(baseEnv).dangerouslyAllowShellInSecretWorkspaces, false);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.deepEqual(loadConfig(baseEnv).subagents, { enabled: false, providers: [] });
@@ -141,11 +146,11 @@ assert.equal(loadConfig(baseEnv).publicBaseUrl, "http://127.0.0.1:7676");
 assert.deepEqual(loadConfig(baseEnv).allowedHosts, ["localhost", "127.0.0.1", "::1"]);
 
 assert.equal(
-  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/" }).publicBaseUrl,
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/", DEVSPACE_SHELL_SANDBOX: "devspace-test" }).publicBaseUrl,
   "https://abc.trycloudflare.com",
 );
 assert.deepEqual(
-  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/" }).allowedHosts,
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/", DEVSPACE_SHELL_SANDBOX: "devspace-test" }).allowedHosts,
   ["localhost", "127.0.0.1", "::1", "abc.trycloudflare.com"],
 );
 assert.deepEqual(
@@ -160,6 +165,7 @@ writeFileSync(
     port: 8787,
     allowedRoots: [process.cwd()],
     publicBaseUrl: "https://devspace.example.com",
+    shellSandbox: "devspace-test",
     subagents: true,
     artifactsEnabled: true,
     artifactMaxFileBytes: 321,
@@ -194,6 +200,9 @@ writeFileSync(
     allowedRoots: [process.cwd()],
     workspaceAliases: { demo: process.cwd() },
     shellSandbox: "devspace-coding",
+    shellEnvAllowlist: ["SAFE_SECRET_FOR_SHELL"],
+    agentEnvAllowlist: ["SAFE_SECRET_FOR_AGENT"],
+    dangerouslyAllowShellInSecretWorkspaces: true,
     sshAdminPolicy: "timed-unlock",
     sshHosts: [
       {
@@ -214,6 +223,9 @@ const customConfig = loadConfig({
 });
 assert.equal(customConfig.workspaceAliases.demo, process.cwd());
 assert.equal(customConfig.shellSandbox, "devspace-coding");
+assert.deepEqual(customConfig.shellEnvAllowlist, ["SAFE_SECRET_FOR_SHELL"]);
+assert.deepEqual(customConfig.agentEnvAllowlist, ["SAFE_SECRET_FOR_AGENT"]);
+assert.equal(customConfig.dangerouslyAllowShellInSecretWorkspaces, true);
 assert.equal(customConfig.sshAdminPolicy, "timed-unlock");
 assert.equal(customConfig.sshHosts[0]?.name, "prod-web");
 assert.equal(customConfig.sshHosts[0]?.aliases?.[0], "production");
@@ -235,4 +247,34 @@ assert.throws(
     DEVSPACE_SHELL_SANDBOX: "bad sandbox name",
   }),
   /Invalid DEVSPACE_SHELL_SANDBOX/,
+);
+assert.throws(
+  () => loadConfig({
+    ...baseEnv,
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+  }),
+  /requires shellSandbox/,
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+    DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL: "1",
+  }).dangerouslyAllowUnsandboxedPublicShell,
+  true,
+);
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_SHELL_ENV_ALLOWLIST: "OPENAI_API_KEY,GITHUB_TOKEN,OPENAI_API_KEY",
+    DEVSPACE_AGENT_ENV_ALLOWLIST: "ANTHROPIC_API_KEY",
+  }).shellEnvAllowlist,
+  ["OPENAI_API_KEY", "GITHUB_TOKEN"],
+);
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_AGENT_ENV_ALLOWLIST: "ANTHROPIC_API_KEY",
+  }).agentEnvAllowlist,
+  ["ANTHROPIC_API_KEY"],
 );

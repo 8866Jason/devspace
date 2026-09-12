@@ -103,6 +103,16 @@ assert.equal((await runSshTool({ host: "prod", command: "uptime" }, [])).isError
 assert.equal((await runSshTool({ host: "missing", command: "uptime" }, normalized)).isError, true);
 assert.equal((await runSshTool({ host: "prod-web_1", command: "" }, normalized)).isError, true);
 
+const defaultLockedAdmin = await runSshTool(
+  { host: "prod-root", command: "uptime" },
+  admin,
+);
+assert.equal(defaultLockedAdmin.isError, true);
+assert.match(
+  defaultLockedAdmin.content[0]?.type === "text" ? defaultLockedAdmin.content[0].text : "",
+  /locally locked/,
+);
+
 const unlockDir = mkdtempSync(join(tmpdir(), "devspace-ssh-unlock-"));
 try {
   const unlockPath = join(unlockDir, "ssh-admin-unlock.json");
@@ -126,7 +136,9 @@ try {
   );
 
   assert.equal(unlockSshAdmin(unlockPath, 15, 1_000), 1_900);
-  assert.equal(statSync(unlockPath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(unlockPath).mode & 0o777, 0o600);
+  }
   assert.deepEqual(sshAdminUnlockStatus(unlockPath, 1_100), {
     unlocked: true,
     expiresAt: 1_900,

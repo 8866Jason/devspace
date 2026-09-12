@@ -54,6 +54,7 @@ import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { FixedWindowRateLimiter } from "./security.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
@@ -338,7 +339,6 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
     host: req.header("host"),
     userAgent: req.header("user-agent"),
     origin: req.header("origin"),
-    referer: req.header("referer"),
     contentLength: req.header("content-length"),
   };
 }
@@ -362,12 +362,6 @@ function contentText(content: ToolContent[]): string {
     .join("\n");
 }
 
-function toolErrorPreview(content: ToolContent[]): string | undefined {
-  const text = contentText(content).replace(/\s+/g, " ").trim();
-  if (!text) return undefined;
-  return text.length > 240 ? `${text.slice(0, 237)}...` : text;
-}
-
 function logFailedToolResponse(
   config: ServerConfig,
   fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
@@ -378,7 +372,7 @@ function logFailedToolResponse(
     ...fields,
     success: false,
     durationMs: Math.round(performance.now() - startedAt),
-    error: toolErrorPreview(content),
+    error: content.length > 0 ? "tool execution failed" : undefined,
   });
 }
 
@@ -628,6 +622,7 @@ function registerCodexProcessTools(
     async ({ workspaceId, cmd, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
+      await workspaces.assertShellWorkspaceSafe(workspace);
       const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
       const snapshot = await processSessions.start({
         workspaceId,
@@ -635,6 +630,7 @@ function registerCodexProcessTools(
         cwd,
         workspaceRoot: workspace.root,
         sandbox: config.shellSandbox,
+        envAllowlist: config.shellEnvAllowlist,
         tty,
         columns,
         rows,
@@ -1491,7 +1487,11 @@ export function createMcpServer(
       async ({ workspaceId, patch }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
-        const applied = await applyPatch(workspace.root, patch);
+        const applied = await applyPatch(workspace.root, patch, {
+          assertPathAllowed: (path) => {
+            workspaces.resolveMutationPath(workspace, path);
+          },
+        });
         const paths = applied.files.map((file) => file.path).join(", ");
         const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
         const content = [textBlock(result)];
@@ -1553,6 +1553,22 @@ export function createMcpServer(
       async ({ workspaceId }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const pendingReview = await reviewCheckpoints.reviewChanges({
+          workspaceId,
+          root: workspace.root,
+          markReviewed: false,
+        });
+        const protectedChange = pendingReview.files.some((file) =>
+          workspaces.isProtectedWorkspacePath(workspace, file.path)
+          || (file.previousPath !== undefined && workspaces.isProtectedWorkspacePath(workspace, file.previousPath))
+        );
+        if (protectedChange) {
+          const content = [textBlock(
+            "Change review is blocked because the pending diff includes a protected workspace secret path.",
+          )];
+          logFailedToolResponse(config, { tool: "show_changes", workspaceId }, content, startedAt);
+          return { content, isError: true };
+        }
         const review = await reviewCheckpoints.reviewChanges({
           workspaceId,
           root: workspace.root,
@@ -1620,6 +1636,7 @@ export function createMcpServer(
         const response = await grepFilesTool(input, {
           cwd: workspace.root,
           root: workspace.root,
+          isPathProtected: (path) => workspaces.isProtectedWorkspacePath(workspace, path),
         });
 
         if (response.isError) {
@@ -1837,6 +1854,7 @@ export function createMcpServer(
     async ({ workspaceId, workingDirectory, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
+      await workspaces.assertShellWorkspaceSafe(workspace);
       const cwd = workspaces.resolveWorkingDirectory(
         workspace,
         workingDirectory,
@@ -1845,6 +1863,7 @@ export function createMcpServer(
         cwd,
         root: workspace.root,
         sandbox: config.shellSandbox,
+        envAllowlist: config.shellEnvAllowlist,
       });
 
       if (response.isError) {
@@ -1971,6 +1990,11 @@ export function createServer(
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
+  const oauthRateLimiters = new Map<string, FixedWindowRateLimiter>([
+    ["/authorize", new FixedWindowRateLimiter(8, 15 * 60 * 1_000)],
+    ["/register", new FixedWindowRateLimiter(20, 60 * 60 * 1_000)],
+    ["/token", new FixedWindowRateLimiter(60, 15 * 60 * 1_000)],
+  ]);
   const transports = new McpSessionRegistry<Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
@@ -2049,6 +2073,29 @@ export function createServer(
     });
 
     next();
+  });
+
+  app.use((req, res, next) => {
+    if (req.method !== "POST") {
+      next();
+      return;
+    }
+    const limiter = oauthRateLimiters.get(req.path);
+    if (!limiter) {
+      next();
+      return;
+    }
+    const source = requestIp(req, config.logging.trustProxy) ?? "unknown";
+    const limited = limiter.consume(source);
+    if (limited.allowed) {
+      next();
+      return;
+    }
+    res.setHeader("Retry-After", String(limited.retryAfterSeconds));
+    res.status(429).json({
+      error: "temporarily_unavailable",
+      error_description: "Too many OAuth requests. Try again later.",
+    });
   });
 
   app.use(
