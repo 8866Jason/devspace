@@ -8,13 +8,15 @@ const forbiddenBasenames = new Set([
   "ssh-admin-unlock.json",
   "oauth-clients.json",
   "oauth-refresh-tokens.json",
-  ".bluehost-account-pass.tmp",
-  ".bluehost-root-pass.tmp",
   "id_rsa",
   "id_dsa",
   "id_ecdsa",
   "id_ed25519",
 ]);
+const forbiddenNamePatterns = [
+  /^\.devspace-(?:credential|secret)-.*\.tmp$/i,
+  /-password\.tmp$/i,
+];
 const forbiddenExtensions = [".pem", ".p12", ".pfx", ".key"];
 const secretPatterns = [
   ["private-key-header", /-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----/],
@@ -41,7 +43,11 @@ for (const path of files) {
   if (!stats.isFile()) continue;
 
   const name = basename(path);
-  if (forbiddenBasenames.has(name) || forbiddenExtensions.some((extension) => name.endsWith(extension))) {
+  if (
+    forbiddenBasenames.has(name) ||
+    forbiddenNamePatterns.some((pattern) => pattern.test(name)) ||
+    forbiddenExtensions.some((extension) => name.endsWith(extension))
+  ) {
     findings.push({ path, rule: "forbidden-secret-filename" });
     continue;
   }
