@@ -1,14 +1,18 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
+import { parseEnvironmentAllowlist } from "./security.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
-import { loadDevspaceFiles } from "./user-config.js";
+import { normalizeSshHosts, type SshAdminPolicy, type SshHostConfig } from "./ssh-tool.js";
+import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
+import { resolveSubagentsConfig, type SubagentsConfig } from "./local-agent-config.js";
 
-export type ToolNamingMode = "legacy" | "short";
+export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 export interface ServerConfig {
   host: string;
@@ -17,14 +21,28 @@ export interface ServerConfig {
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
-  minimalTools: boolean;
-  toolNaming: ToolNamingMode;
+  toolMode: ToolMode;
   widgets: WidgetMode;
   stateDir: string;
   worktreeRoot: string;
+  artifactsEnabled: boolean;
+  artifactMaxFileBytes: number;
   skillsEnabled: boolean;
   skillPaths: string[];
+  devspaceSkillsDir: string;
+  devspaceAgentsDir: string;
+  subagents: SubagentsConfig;
   agentDir: string;
+  workspaceAliases: Record<string, string>;
+  shellSandbox?: string;
+  shellEnvAllowlist: string[];
+  agentEnvAllowlist: string[];
+  dangerouslyAllowUnsandboxedPublicShell: boolean;
+  dangerouslyAllowShellInSecretWorkspaces: boolean;
+  sshHosts: SshHostConfig[];
+  sshAdminPolicy: SshAdminPolicy;
+  sshAdminUnlockPath: string;
+  dangerouslyAllowShellInCredentialRoots: boolean;
   logging: LoggingConfig;
 }
 
@@ -79,14 +97,15 @@ function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
-function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
-  if (env.DEVSPACE_TOOL_MODE === "minimal") return true;
-  if (env.DEVSPACE_TOOL_MODE === "full") return false;
-  if (env.DEVSPACE_TOOL_MODE) {
-    throw new Error(`Invalid DEVSPACE_TOOL_MODE: ${env.DEVSPACE_TOOL_MODE}`);
+function parseToolMode(env: NodeJS.ProcessEnv): ToolMode {
+  const mode = env.DEVSPACE_TOOL_MODE;
+  if (mode === "minimal" || mode === "full" || mode === "codex") return mode;
+  if (mode) throw new Error(`Invalid DEVSPACE_TOOL_MODE: ${mode}`);
+
+  if (env.DEVSPACE_MINIMAL_TOOLS !== undefined) {
+    return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS) ? "minimal" : "full";
   }
-  if (env.DEVSPACE_MINIMAL_TOOLS !== undefined) return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS);
-  return true;
+  return "minimal";
 }
 
 function parseLogLevel(value: string | undefined): LogLevel {
@@ -108,9 +127,38 @@ function parsePathList(value: string | undefined): string[] {
     value
       ?.split(",")
       .map((entry) => entry.trim())
-      .filter(Boolean)
-      .map((entry) => resolve(expandHomePath(entry))) ?? []
+      .filter(Boolean) ?? []
   );
+}
+
+function parseWorkspaceAliases(value: Record<string, string> | undefined): Record<string, string> {
+  if (!value) return {};
+
+  return Object.fromEntries(Object.entries(value).map(([alias, path]) => {
+    const normalizedAlias = alias.trim();
+    const normalizedPath = path.trim();
+    if (!normalizedAlias) throw new Error("Workspace alias must not be empty.");
+    if (!normalizedPath) throw new Error(`Workspace alias ${normalizedAlias} must define a path.`);
+    if (!/^[A-Za-z0-9._-]+$/.test(normalizedAlias)) {
+      throw new Error(`Invalid workspace alias: ${normalizedAlias}`);
+    }
+    return [normalizedAlias, resolve(expandHomePath(normalizedPath))];
+  }));
+}
+
+function parseShellSandbox(value: string | undefined): string | undefined {
+  const name = value?.trim();
+  if (!name) return undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(name)) {
+    throw new Error(`Invalid DEVSPACE_SHELL_SANDBOX: ${value}`);
+  }
+  return name;
+}
+
+function parseSshAdminPolicy(value: string | undefined): SshAdminPolicy {
+  if (!value || value === "timed-unlock") return "timed-unlock";
+  if (value === "direct") return value;
+  throw new Error(`Invalid sshAdminPolicy: ${value}`);
 }
 
 function parseStringList(value: string | undefined, fallback: string[]): string[] {
@@ -122,22 +170,20 @@ function parseStringList(value: string | undefined, fallback: string[]): string[
   return entries && entries.length > 0 ? entries : fallback;
 }
 
-function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
   if (!value) return fallback;
 
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) {
     throw new Error(`Invalid ${name}: ${value}`);
   }
 
   return parsed;
-}
-
-function parseToolNaming(value: string | undefined): ToolNamingMode {
-  if (!value || value === "short") return "short";
-  if (value === "legacy") return "legacy";
-
-  throw new Error(`Invalid DEVSPACE_TOOL_NAMING: ${value}`);
 }
 
 function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
@@ -211,6 +257,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = parsePublicBaseUrl(
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
+  const shellSandbox =
+    files.config.shellSandbox === null
+      ? undefined
+      : parseShellSandbox(files.config.shellSandbox ?? env.DEVSPACE_SHELL_SANDBOX);
+  const dangerouslyAllowUnsandboxedPublicShell = parseBoolean(
+    env.DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL,
+  );
+  if (!isLoopbackPublicUrl(publicBaseUrl) && !shellSandbox && !dangerouslyAllowUnsandboxedPublicShell) {
+    throw new Error(
+      "A public DevSpace endpoint requires shellSandbox. Set shellSandbox or DEVSPACE_SHELL_SANDBOX; use DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL=1 only as an explicit break-glass override.",
+    );
+  }
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -227,16 +285,50 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
-    minimalTools: parseMinimalTools(env),
-    toolNaming: parseToolNaming(env.DEVSPACE_TOOL_NAMING),
+    toolMode: parseToolMode(env),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
+    artifactsEnabled:
+      env.DEVSPACE_ARTIFACTS === undefined
+        ? files.config.artifactsEnabled === true
+        : parseBoolean(env.DEVSPACE_ARTIFACTS),
+    artifactMaxFileBytes: parsePositiveInteger(
+      env.DEVSPACE_ARTIFACT_MAX_FILE_BYTES ?? numberConfigValue(files.config.artifactMaxFileBytes),
+      DEFAULT_ARTIFACT_MAX_FILE_BYTES,
+      "DEVSPACE_ARTIFACT_MAX_FILE_BYTES",
+    ),
     skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
+    devspaceSkillsDir: devspaceSkillsDir(env),
+    devspaceAgentsDir: devspaceAgentsDir(env),
+    subagents: resolveSubagentsConfig(files.config.subagents, env),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    workspaceAliases: parseWorkspaceAliases(files.config.workspaceAliases),
+    shellSandbox,
+    shellEnvAllowlist: parseEnvironmentAllowlist(
+      env.DEVSPACE_SHELL_ENV_ALLOWLIST ?? files.config.shellEnvAllowlist?.join(","),
+    ),
+    agentEnvAllowlist: parseEnvironmentAllowlist(
+      env.DEVSPACE_AGENT_ENV_ALLOWLIST ?? files.config.agentEnvAllowlist?.join(","),
+    ),
+    dangerouslyAllowUnsandboxedPublicShell,
+    dangerouslyAllowShellInSecretWorkspaces:
+      env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_SECRET_WORKSPACES === undefined
+        ? files.config.dangerouslyAllowShellInSecretWorkspaces === true
+        : parseBoolean(env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_SECRET_WORKSPACES),
+    sshHosts: normalizeSshHosts(files.config.sshHosts ?? []),
+    sshAdminPolicy: parseSshAdminPolicy(files.config.sshAdminPolicy),
+    sshAdminUnlockPath: join(files.dir, "ssh-admin-unlock.json"),
+    dangerouslyAllowShellInCredentialRoots: parseBoolean(
+      env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS,
+    ),
     logging: parseLoggingConfig(env),
   };
+}
+
+function numberConfigValue(value: number | undefined): string | undefined {
+  return value === undefined ? undefined : String(value);
 }
 
 function parsePublicBaseUrl(value: string): string {
@@ -245,6 +337,14 @@ function parsePublicBaseUrl(value: string): string {
   parsed.search = "";
   parsed.pathname = parsed.pathname.replace(/\/+$/, "");
   return parsed.toString().replace(/\/$/, "");
+}
+
+function isLoopbackPublicUrl(value: string): boolean {
+  const hostname = new URL(value).hostname.toLowerCase();
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1"
+    || hostname === "[::1]";
 }
 
 function localPublicBaseUrl(host: string, port: number): string {

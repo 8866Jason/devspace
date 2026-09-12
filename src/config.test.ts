@@ -15,18 +15,34 @@ assert.equal(loadConfig(baseEnv).widgets, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).widgets, "changes");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "full" }).widgets, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "off" }).widgets, "off");
-assert.equal(loadConfig(baseEnv).toolNaming, "short");
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_NAMING: "short" }).toolNaming, "short");
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_NAMING: "legacy" }).toolNaming, "legacy");
-assert.equal(loadConfig(baseEnv).minimalTools, true);
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "minimal" }).minimalTools, true);
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "full" }).minimalTools, false);
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "0" }).minimalTools, false);
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).minimalTools, true);
+assert.equal(loadConfig(baseEnv).toolMode, "minimal");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "minimal" }).toolMode, "minimal");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "full" }).toolMode, "full");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "codex" }).toolMode, "codex");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "0" }).toolMode, "full");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).toolMode, "minimal");
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
+assert.equal(loadConfig(baseEnv).sshAdminPolicy, "timed-unlock");
+assert.deepEqual(loadConfig(baseEnv).shellEnvAllowlist, []);
+assert.deepEqual(loadConfig(baseEnv).agentEnvAllowlist, []);
+assert.equal(loadConfig(baseEnv).dangerouslyAllowUnsandboxedPublicShell, false);
+assert.equal(loadConfig(baseEnv).dangerouslyAllowShellInSecretWorkspaces, false);
+assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
+assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
+assert.deepEqual(loadConfig(baseEnv).subagents, { enabled: false, providers: [] });
+assert.equal(loadConfig(baseEnv).artifactsEnabled, false);
+assert.equal(loadConfig(baseEnv).artifactMaxFileBytes, 100 * 1024 * 1024);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_ARTIFACTS: "1" }).artifactsEnabled, true);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_ARTIFACT_MAX_FILE_BYTES: "123" }).artifactMaxFileBytes,
+  123,
+);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
-
+assert.deepEqual(loadConfig({ ...baseEnv, DEVSPACE_SUBAGENTS: "1" }).subagents, {
+  enabled: true,
+  providers: [],
+});
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "invalid" }),
   /Invalid DEVSPACE_WIDGETS: invalid/,
@@ -42,10 +58,6 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "invalid" }),
   /Invalid DEVSPACE_TOOL_MODE: invalid/,
-);
-assert.throws(
-  () => loadConfig({ ...baseEnv, DEVSPACE_TOOL_NAMING: "invalid" }),
-  /Invalid DEVSPACE_TOOL_NAMING: invalid/,
 );
 
 assert.deepEqual(loadConfig(baseEnv).logging, {
@@ -125,16 +137,20 @@ assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "0" }),
   /Invalid DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS: 0/,
 );
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_ARTIFACT_MAX_FILE_BYTES: "0" }),
+  /Invalid DEVSPACE_ARTIFACT_MAX_FILE_BYTES: 0/,
+);
 
 assert.equal(loadConfig(baseEnv).publicBaseUrl, "http://127.0.0.1:7676");
 assert.deepEqual(loadConfig(baseEnv).allowedHosts, ["localhost", "127.0.0.1", "::1"]);
 
 assert.equal(
-  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/" }).publicBaseUrl,
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/", DEVSPACE_SHELL_SANDBOX: "devspace-test" }).publicBaseUrl,
   "https://abc.trycloudflare.com",
 );
 assert.deepEqual(
-  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/" }).allowedHosts,
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/", DEVSPACE_SHELL_SANDBOX: "devspace-test" }).allowedHosts,
   ["localhost", "127.0.0.1", "::1", "abc.trycloudflare.com"],
 );
 assert.deepEqual(
@@ -149,6 +165,10 @@ writeFileSync(
     port: 8787,
     allowedRoots: [process.cwd()],
     publicBaseUrl: "https://devspace.example.com",
+    shellSandbox: "devspace-test",
+    subagents: true,
+    artifactsEnabled: true,
+    artifactMaxFileBytes: 321,
   }),
 );
 writeFileSync(
@@ -162,9 +182,99 @@ const fileConfig = loadConfig({ DEVSPACE_CONFIG_DIR: configDir });
 assert.equal(fileConfig.port, 8787);
 assert.equal(fileConfig.oauth.ownerToken, "persisted-owner-token-long-enough");
 assert.equal(fileConfig.publicBaseUrl, "https://devspace.example.com");
+assert.equal(fileConfig.subagents.enabled, true);
+assert.equal(fileConfig.subagents.providers.length, 7);
+assert.equal(fileConfig.artifactsEnabled, true);
+assert.equal(fileConfig.artifactMaxFileBytes, 321);
 assert.deepEqual(fileConfig.allowedHosts, [
   "localhost",
   "127.0.0.1",
   "::1",
   "devspace.example.com",
 ]);
+
+const customConfigDir = mkdtempSync(join(tmpdir(), "devspace-custom-config-test-"));
+writeFileSync(
+  join(customConfigDir, "config.json"),
+  JSON.stringify({
+    allowedRoots: [process.cwd()],
+    workspaceAliases: { demo: process.cwd() },
+    shellSandbox: "devspace-coding",
+    shellEnvAllowlist: ["SAFE_SECRET_FOR_SHELL"],
+    agentEnvAllowlist: ["SAFE_SECRET_FOR_AGENT"],
+    dangerouslyAllowShellInSecretWorkspaces: true,
+    sshAdminPolicy: "timed-unlock",
+    sshHosts: [
+      {
+        name: "prod-web",
+        aliases: ["production"],
+        host: "example.com",
+        user: "deploy",
+        port: 2222,
+        identityFile: "~/.ssh/id_ed25519_test_fixture",
+        tier: "admin",
+      },
+    ],
+  }),
+);
+const customConfig = loadConfig({
+  DEVSPACE_CONFIG_DIR: customConfigDir,
+  DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+});
+assert.equal(customConfig.workspaceAliases.demo, process.cwd());
+assert.equal(customConfig.shellSandbox, "devspace-coding");
+assert.deepEqual(customConfig.shellEnvAllowlist, ["SAFE_SECRET_FOR_SHELL"]);
+assert.deepEqual(customConfig.agentEnvAllowlist, ["SAFE_SECRET_FOR_AGENT"]);
+assert.equal(customConfig.dangerouslyAllowShellInSecretWorkspaces, true);
+assert.equal(customConfig.sshAdminPolicy, "timed-unlock");
+assert.equal(customConfig.sshHosts[0]?.name, "prod-web");
+assert.equal(customConfig.sshHosts[0]?.aliases?.[0], "production");
+assert.equal(customConfig.sshHosts[0]?.host, "example.com");
+assert.equal(customConfig.sshHosts[0]?.tier, "admin");
+assert.match(customConfig.sshAdminUnlockPath, /ssh-admin-unlock\.json$/);
+assert.equal(customConfig.dangerouslyAllowShellInCredentialRoots, false);
+assert.equal(
+  loadConfig({
+    DEVSPACE_CONFIG_DIR: customConfigDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS: "1",
+  }).dangerouslyAllowShellInCredentialRoots,
+  true,
+);
+assert.throws(
+  () => loadConfig({
+    ...baseEnv,
+    DEVSPACE_SHELL_SANDBOX: "bad sandbox name",
+  }),
+  /Invalid DEVSPACE_SHELL_SANDBOX/,
+);
+assert.throws(
+  () => loadConfig({
+    ...baseEnv,
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+  }),
+  /requires shellSandbox/,
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+    DEVSPACE_DANGEROUSLY_ALLOW_UNSANDBOXED_PUBLIC_SHELL: "1",
+  }).dangerouslyAllowUnsandboxedPublicShell,
+  true,
+);
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_SHELL_ENV_ALLOWLIST: "OPENAI_API_KEY,GITHUB_TOKEN,OPENAI_API_KEY",
+    DEVSPACE_AGENT_ENV_ALLOWLIST: "ANTHROPIC_API_KEY",
+  }).shellEnvAllowlist,
+  ["OPENAI_API_KEY", "GITHUB_TOKEN"],
+);
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_AGENT_ENV_ALLOWLIST: "ANTHROPIC_API_KEY",
+  }).agentEnvAllowlist,
+  ["ANTHROPIC_API_KEY"],
+);

@@ -92,9 +92,33 @@ Managed worktrees reduce accidental edits to your active checkout, but they are
 not a security boundary. They are a workflow boundary for isolated coding
 sessions.
 
+## Native File Download
+
+Native file download is an opt-in, one-shot transfer into an already-open
+workspace. `download_artifact` accepts the MCP host's native file value, the
+`workspaceId` returned by `open_workspace`, and an unused relative destination
+path. It returns only the workspace-relative path and does not create a
+persistent artifact service or reusable artifact ID.
+
+DevSpace accepts only the documented native-file object and trusted OpenAI
+download hosts and redirects. Arbitrary URL strings, local source paths,
+credentials, malformed references, and unknown object fields are rejected.
+
+Absolute paths, traversal, symlinked parents, and existing destinations also
+fail closed. Downloads stream under the configured per-file limit and are
+published without overwrite as owner-only files. DevSpace does not extract or
+execute transferred content.
+
 ## Logs
 
 By default, DevSpace logs requests and tool calls. Shell command previews are
 disabled unless `DEVSPACE_LOG_SHELL_COMMANDS=1`.
 
 Do not enable shell command logging if commands may contain secrets.
+
+Artifact tool logs contain bounded workspace ID, validated hostname,
+workspace-relative output path, byte count, hash, duration, and status metadata.
+`download_artifact` does not log the opaque file value. Raw content, connector
+references, native file IDs, bearer credentials, presigned URLs, host paths,
+temporary paths, and base64 chunks are never included in tool logs or tool
+results.

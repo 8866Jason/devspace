@@ -8,6 +8,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
+import type { StoredSubagentsConfig } from "./local-agent-config.js";
 
 export interface DevspaceUserConfig {
   host?: string;
@@ -17,7 +18,25 @@ export interface DevspaceUserConfig {
   allowedHosts?: string[];
   stateDir?: string;
   worktreeRoot?: string;
+  artifactsEnabled?: boolean;
+  artifactMaxFileBytes?: number;
   agentDir?: string;
+  subagents?: StoredSubagentsConfig;
+  shellSandbox?: string | null;
+  shellEnvAllowlist?: string[];
+  agentEnvAllowlist?: string[];
+  dangerouslyAllowShellInSecretWorkspaces?: boolean;
+  workspaceAliases?: Record<string, string>;
+  sshAdminPolicy?: "direct" | "timed-unlock";
+  sshHosts?: Array<{
+    name: string;
+    aliases?: string[];
+    host: string;
+    user?: string;
+    port?: number;
+    identityFile?: string;
+    tier?: "standard" | "admin";
+  }>;
 }
 
 export interface DevspaceAuthConfig {
@@ -44,6 +63,14 @@ export function devspaceConfigPath(env: NodeJS.ProcessEnv = process.env): string
 
 export function devspaceAuthPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(devspaceConfigDir(env), "auth.json");
+}
+
+export function devspaceSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(devspaceConfigDir(env), "skills");
+}
+
+export function devspaceAgentsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(devspaceConfigDir(env), "agents");
 }
 
 export function loadDevspaceFiles(env: NodeJS.ProcessEnv = process.env): DevspaceFiles {

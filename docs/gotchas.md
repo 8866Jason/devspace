@@ -15,7 +15,7 @@ If you installed globally, confirm npm's global bin directory is on `PATH`.
 
 ## Unsupported Node Version
 
-DevSpace requires Node `>=20.12 <27`.
+DevSpace requires Node `>=22.19 <27`.
 
 Check:
 
@@ -136,12 +136,29 @@ npx @waishnav/devspace init --force
 client receives an unknown workspace error, call `open_workspace` again for that
 project.
 
-Workspace session metadata is persisted, but clients should still treat
-`open_workspace` as the way to begin a fresh working session.
+Workspace session metadata is persisted. ChatGPT may provide optional
+conversation metadata that lets DevSpace resume the same checkout workspace for
+the same project in that conversation; repeated opens reuse the `workspaceId`
+and do not repeat context already provided for that reused checkout. Worktree
+mode always creates a new isolated workspace with its own complete context.
+Hosts without supported conversation metadata receive a normal new workspace.
+In all cases, continue passing the `workspaceId` returned by `open_workspace` to
+later tools. Other MCP hosts use this explicit workspace workflow as well.
 
-## Workspace Path Rejected
+To review work, call `show_changes` once after the final related file change. It
+shows the combined changes and advances the review point automatically.
 
-The path must be inside one of the allowed roots configured during setup.
+## Data Retention
+
+DevSpace does not currently prune workspace sessions, conversation bindings,
+or review refs. A future product retention policy will define safe cleanup for
+these records; no automatic deletion is performed today.
+
+## MCP Workspace Path Rejected
+
+The path passed to `open_workspace` must be inside one of the allowed roots
+configured during ChatGPT setup. Direct `devspace agents` commands instead use
+the current local project and are not gated by MCP allowed roots.
 
 Run:
 
@@ -193,11 +210,43 @@ Skills are enabled by default. Check:
 DEVSPACE_SKILLS=1 npx @waishnav/devspace serve
 ```
 
-DevSpace looks in:
+DevSpace looks in standard Agent Skills locations:
 
-- `DEVSPACE_AGENT_DIR`, defaulting to `~/.codex`
-- project `.pi/skills`
-- `DEVSPACE_SKILL_PATHS`
+- `~/.agents/skills`
+- project `.agents/skills`
+- `~/.devspace/skills`
+
+It also checks compatibility and custom paths:
+
+- the bundled `subagents` skill when Subagents are enabled, unless `~/.devspace/skills/subagents/SKILL.md` exists
+- `DEVSPACE_AGENT_DIR/skills`, defaulting to `~/.codex/skills`
+- additional paths from `DEVSPACE_SKILL_PATHS`
+
+When Subagents are enabled, DevSpace loads agent profiles from
+`~/.devspace/agents/*.md` and project `.devspace/agents/*.md`, then exposes a
+compact profile catalog through `open_workspace`. The bundled
+`subagents` skill keeps the model-facing workflow to
+`devspace agents targets`, `devspace agents ls`, `devspace agents run`,
+`devspace agents continue`, and `devspace agents show`.
+Those commands automatically manage the internal local agent daemon; `devspace
+serve` is not a prerequisite.
+`devspace agents ls` lists existing subagent sessions, not profile
+definitions.
+
+For a Coding Agent, run the installation command printed by
+`devspace init`:
+
+```bash
+npx skills add Waishnav/devspace --skill subagents --global
+```
+
+The Skills CLI handles agent discovery and installation. DevSpace setup does
+not copy files into agent skill directories.
+
+Packaged agent profile examples under `examples/agents/` are starter templates.
+Copy or adapt them into one of the active profile directories before use.
+
+Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
 If a skill appears in `open_workspace`, the model must read that skill's
 `SKILL.md` before reading other files inside the skill directory.

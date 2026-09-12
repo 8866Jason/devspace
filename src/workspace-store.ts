@@ -1,7 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
+  workspaceConversationBindings,
   workspaceSessions,
+  type WorkspaceConversationBindingRow,
   type WorkspaceSessionRow,
 } from "./db/schema.js";
 
@@ -20,6 +22,14 @@ export interface WorkspaceSession {
   lastUsedAt: string;
 }
 
+export interface WorkspaceConversationBinding {
+  conversationScopeId: string;
+  targetKey: string;
+  workspaceSessionId: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
 export interface WorkspaceStore {
   createSession(input: {
     id: string;
@@ -32,6 +42,18 @@ export interface WorkspaceStore {
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
   touchSession(id: string): void;
+  updateRoot(id: string, root: string): void;
+  getConversationBinding(
+    conversationScopeId: string,
+    targetKey: string,
+  ): WorkspaceConversationBinding | undefined;
+  setConversationBinding(input: {
+    conversationScopeId: string;
+    targetKey: string;
+    workspaceSessionId: string;
+  }): WorkspaceConversationBinding;
+  touchConversationBinding(conversationScopeId: string, targetKey: string): void;
+  deleteConversationBinding(conversationScopeId: string, targetKey: string): void;
   close?(): void;
 }
 
@@ -40,7 +62,6 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
 
   constructor(stateDir: string) {
     this.database = openDatabase(stateDir);
-    this.migrate();
   }
 
   createSession(input: {
@@ -103,63 +124,96 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .run();
   }
 
+  updateRoot(id: string, root: string): void {
+    this.database.db
+      .update(workspaceSessions)
+      .set({ root, lastUsedAt: new Date().toISOString() })
+      .where(eq(workspaceSessions.id, id))
+      .run();
+  }
+
+  getConversationBinding(
+    conversationScopeId: string,
+    targetKey: string,
+  ): WorkspaceConversationBinding | undefined {
+    const row = this.database.db
+      .select()
+      .from(workspaceConversationBindings)
+      .where(
+        and(
+          eq(workspaceConversationBindings.conversationScopeId, conversationScopeId),
+          eq(workspaceConversationBindings.targetKey, targetKey),
+        ),
+      )
+      .get();
+
+    return row ? rowToWorkspaceConversationBinding(row) : undefined;
+  }
+
+  setConversationBinding(input: {
+    conversationScopeId: string;
+    targetKey: string;
+    workspaceSessionId: string;
+  }): WorkspaceConversationBinding {
+    const now = new Date().toISOString();
+    const row = this.database.db
+      .insert(workspaceConversationBindings)
+      .values({
+        conversationScopeId: input.conversationScopeId,
+        targetKey: input.targetKey,
+        workspaceSessionId: input.workspaceSessionId,
+        createdAt: now,
+        lastUsedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          workspaceConversationBindings.conversationScopeId,
+          workspaceConversationBindings.targetKey,
+        ],
+        set: {
+          workspaceSessionId: input.workspaceSessionId,
+          lastUsedAt: now,
+        },
+      })
+      .returning()
+      .get();
+
+    if (!row) {
+      throw new Error("Conversation workspace binding upsert returned no row.");
+    }
+
+    return rowToWorkspaceConversationBinding(row);
+  }
+
+  touchConversationBinding(conversationScopeId: string, targetKey: string): void {
+    this.database.db
+      .update(workspaceConversationBindings)
+      .set({ lastUsedAt: new Date().toISOString() })
+      .where(
+        and(
+          eq(workspaceConversationBindings.conversationScopeId, conversationScopeId),
+          eq(workspaceConversationBindings.targetKey, targetKey),
+        ),
+      )
+      .run();
+  }
+
+  deleteConversationBinding(conversationScopeId: string, targetKey: string): void {
+    this.database.db
+      .delete(workspaceConversationBindings)
+      .where(
+        and(
+          eq(workspaceConversationBindings.conversationScopeId, conversationScopeId),
+          eq(workspaceConversationBindings.targetKey, targetKey),
+        ),
+      )
+      .run();
+  }
+
   close(): void {
     this.database.close();
   }
 
-  private migrate(): void {
-    this.database.sqlite.exec(`
-      create table if not exists workspace_sessions (
-        id text primary key,
-        root text not null,
-        status text not null default 'active',
-        mode text not null default 'checkout',
-        source_root text,
-        base_ref text,
-        base_sha text,
-        managed text not null default 'false',
-        created_at text not null,
-        last_used_at text not null
-      );
-
-      create index if not exists workspace_sessions_root_idx
-        on workspace_sessions(root, last_used_at desc);
-
-      create index if not exists workspace_sessions_status_idx
-        on workspace_sessions(status, last_used_at desc);
-
-      create table if not exists loaded_agent_files (
-        workspace_session_id text not null,
-        path text not null,
-        content_hash text not null,
-        content text not null,
-        loaded_at text not null,
-        last_seen_at text not null,
-        primary key (workspace_session_id, path),
-        foreign key (workspace_session_id)
-          references workspace_sessions(id)
-          on delete cascade
-      );
-
-      create index if not exists loaded_agent_files_path_idx
-        on loaded_agent_files(path);
-    `);
-
-    this.addColumnIfMissing("workspace_sessions", "mode", "text not null default 'checkout'");
-    this.addColumnIfMissing("workspace_sessions", "source_root", "text");
-    this.addColumnIfMissing("workspace_sessions", "base_ref", "text");
-    this.addColumnIfMissing("workspace_sessions", "base_sha", "text");
-    this.addColumnIfMissing("workspace_sessions", "managed", "text not null default 'false'");
-  }
-
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
-    const columns = this.database.sqlite.prepare(`pragma table_info(${table})`).all() as Array<{
-      name: string;
-    }>;
-    if (columns.some((existingColumn) => existingColumn.name === column)) return;
-
-    this.database.sqlite.exec(`alter table ${table} add column ${column} ${definition}`);
-  }
 }
 
 export function createWorkspaceStore(stateDir: string): WorkspaceStore {
@@ -176,6 +230,18 @@ function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
     baseRef: row.baseRef ?? undefined,
     baseSha: row.baseSha ?? undefined,
     managed: row.managed === "true",
+    createdAt: row.createdAt,
+    lastUsedAt: row.lastUsedAt,
+  };
+}
+
+function rowToWorkspaceConversationBinding(
+  row: WorkspaceConversationBindingRow,
+): WorkspaceConversationBinding {
+  return {
+    conversationScopeId: row.conversationScopeId,
+    targetKey: row.targetKey,
+    workspaceSessionId: row.workspaceSessionId,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
   };
