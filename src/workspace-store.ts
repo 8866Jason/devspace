@@ -42,6 +42,7 @@ export interface WorkspaceStore {
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
   touchSession(id: string): void;
+  updateRoot(id: string, root: string): void;
   getConversationBinding(
     conversationScopeId: string,
     targetKey: string,
@@ -119,6 +120,14 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
     this.database.db
       .update(workspaceSessions)
       .set({ lastUsedAt: new Date().toISOString() })
+      .where(eq(workspaceSessions.id, id))
+      .run();
+  }
+
+  updateRoot(id: string, root: string): void {
+    this.database.db
+      .update(workspaceSessions)
+      .set({ root, lastUsedAt: new Date().toISOString() })
       .where(eq(workspaceSessions.id, id))
       .run();
   }

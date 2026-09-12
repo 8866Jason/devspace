@@ -186,3 +186,53 @@ assert.deepEqual(fileConfig.allowedHosts, [
   "::1",
   "devspace.example.com",
 ]);
+
+const customConfigDir = mkdtempSync(join(tmpdir(), "devspace-custom-config-test-"));
+writeFileSync(
+  join(customConfigDir, "config.json"),
+  JSON.stringify({
+    allowedRoots: [process.cwd()],
+    workspaceAliases: { demo: process.cwd() },
+    shellSandbox: "devspace-coding",
+    sshAdminPolicy: "timed-unlock",
+    sshHosts: [
+      {
+        name: "prod-web",
+        aliases: ["production"],
+        host: "example.com",
+        user: "deploy",
+        port: 2222,
+        identityFile: "~/.ssh/id_ed25519_test_fixture",
+        tier: "admin",
+      },
+    ],
+  }),
+);
+const customConfig = loadConfig({
+  DEVSPACE_CONFIG_DIR: customConfigDir,
+  DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+});
+assert.equal(customConfig.workspaceAliases.demo, process.cwd());
+assert.equal(customConfig.shellSandbox, "devspace-coding");
+assert.equal(customConfig.sshAdminPolicy, "timed-unlock");
+assert.equal(customConfig.sshHosts[0]?.name, "prod-web");
+assert.equal(customConfig.sshHosts[0]?.aliases?.[0], "production");
+assert.equal(customConfig.sshHosts[0]?.host, "example.com");
+assert.equal(customConfig.sshHosts[0]?.tier, "admin");
+assert.match(customConfig.sshAdminUnlockPath, /ssh-admin-unlock\.json$/);
+assert.equal(customConfig.dangerouslyAllowShellInCredentialRoots, false);
+assert.equal(
+  loadConfig({
+    DEVSPACE_CONFIG_DIR: customConfigDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS: "1",
+  }).dangerouslyAllowShellInCredentialRoots,
+  true,
+);
+assert.throws(
+  () => loadConfig({
+    ...baseEnv,
+    DEVSPACE_SHELL_SANDBOX: "bad sandbox name",
+  }),
+  /Invalid DEVSPACE_SHELL_SANDBOX/,
+);

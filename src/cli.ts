@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
+import { watch, type FSWatcher } from "node:fs";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import type { Result as BetterResult } from "better-result";
 import * as prompts from "@clack/prompts";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
-import { loadConfig } from "./config.js";
+import { loadConfig, type ServerConfig } from "./config.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
 import { resolveSubagentsConfig } from "./local-agent-config.js";
 import {
@@ -51,11 +53,72 @@ import {
   type DevspaceUserConfig,
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
+import { logEvent } from "./logger.js";
+import {
+  lockSshAdmin,
+  normalizeSshHosts,
+  sshAdminUnlockStatus,
+  unlockSshAdmin,
+} from "./ssh-tool.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "agents" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "agents" | "ssh" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
+const SSH_CONFIG_RELOAD_DELAY_MS = 250;
+
+function watchSshHosts(config: ServerConfig): () => void {
+  const configPath = loadDevspaceFiles().configPath;
+  const configDirectory = dirname(configPath);
+  let watcher: FSWatcher | undefined;
+  let reloadTimer: NodeJS.Timeout | undefined;
+  let stopped = false;
+
+  const reload = () => {
+    reloadTimer = undefined;
+    if (stopped) return;
+    try {
+      const files = loadDevspaceFiles();
+      if (!files.configExists || !Array.isArray(files.config.sshHosts)) {
+        throw new Error("config.json must exist and define sshHosts as an array.");
+      }
+      const nextHosts = normalizeSshHosts(files.config.sshHosts);
+      config.sshHosts = nextHosts;
+      logEvent(config.logging, "info", "ssh_hosts_reloaded", { count: nextHosts.length });
+    } catch (error) {
+      logEvent(config.logging, "warn", "ssh_hosts_reload_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const scheduleReload = () => {
+    if (stopped) return;
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(reload, SSH_CONFIG_RELOAD_DELAY_MS);
+  };
+
+  try {
+    watcher = watch(configDirectory, { persistent: true }, (_event, filename) => {
+      if (!filename || filename.toString() === basename(configPath)) scheduleReload();
+    });
+    watcher.on("error", (error) => {
+      logEvent(config.logging, "warn", "ssh_hosts_watch_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  } catch (error) {
+    logEvent(config.logging, "warn", "ssh_hosts_watch_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return () => {
+    stopped = true;
+    if (reloadTimer) clearTimeout(reloadTimer);
+    watcher?.close();
+  };
+}
 
 async function main(argv: string[]): Promise<void> {
   assertSupportedNode();
@@ -80,6 +143,9 @@ async function main(argv: string[]): Promise<void> {
     case "agents":
       await runAgentsCommand(args);
       return;
+    case "ssh":
+      runSshCommand(args);
+      return;
     case "help":
       printHelp();
       return;
@@ -91,7 +157,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "agents") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "agents" || command === "ssh") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -288,6 +354,7 @@ async function serve(): Promise<void> {
 
   const { createServer } = await import("./server.js");
   const config = loadConfig();
+  const stopSshHostsWatcher = watchSshHosts(config);
   const { app, close, localAgentProviders } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
@@ -306,6 +373,7 @@ async function serve(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopSshHostsWatcher();
     await shutdownHttpServer(httpServer, close);
     process.exit(0);
   };
@@ -337,6 +405,11 @@ async function runDoctor(): Promise<void> {
     console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    console.log(`Shell sandbox: ${config.shellSandbox ?? "disabled"}`);
+    console.log(`SSH hosts: ${config.sshHosts.length} (${config.sshHosts.filter((host) => host.tier === "admin").length} admin)`);
+    console.log(`Admin SSH: ${config.sshAdminPolicy === "direct"
+      ? "direct (no local unlock required)"
+      : sshAdminUnlockStatus(config.sshAdminUnlockPath).unlocked ? "temporarily unlocked" : "locked"}`);
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
       getLocalAgentProviderAvailabilitySnapshot(),
@@ -376,6 +449,59 @@ function runConfigCommand(args: string[]): void {
   console.log(`Updated ${files.configPath}`);
 }
 
+function runSshCommand(args: string[]): void {
+  const [subcommand, ...flags] = args;
+  const config = loadConfig();
+
+  if (subcommand === "admin-status") {
+    if (config.sshAdminPolicy === "direct") {
+      console.log("Admin SSH policy is direct; local unlock is not required.");
+      return;
+    }
+    const status = sshAdminUnlockStatus(config.sshAdminUnlockPath);
+    console.log(status.unlocked
+      ? `Admin SSH unlocked until ${new Date(status.expiresAt! * 1000).toISOString()} (${status.remainingSeconds}s remaining).`
+      : "Admin SSH locked.");
+    return;
+  }
+
+  if (subcommand === "lock-admin") {
+    lockSshAdmin(config.sshAdminUnlockPath);
+    console.log(config.sshAdminPolicy === "direct"
+      ? "Timed admin unlock cleared; policy remains direct."
+      : "Admin SSH locked.");
+    return;
+  }
+
+  if (subcommand === "unlock-admin") {
+    if (config.sshAdminPolicy === "direct") {
+      console.log("Admin SSH policy is direct; no local unlock is required.");
+      return;
+    }
+    if (process.platform !== "darwin") throw new Error("Admin SSH unlock currently requires macOS.");
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error("Admin SSH unlock must be run interactively in a Mac terminal.");
+    }
+    const minutesIndex = flags.indexOf("--minutes");
+    const minutes = minutesIndex >= 0 ? Number(flags[minutesIndex + 1]) : 15;
+    if (minutesIndex >= 0 && flags[minutesIndex + 1] === undefined) {
+      throw new Error("Missing value for --minutes.");
+    }
+
+    const sudo = spawnSync("/usr/bin/sudo", ["-k", "-v"], { stdio: "inherit" });
+    if (sudo.status !== 0) throw new Error("macOS administrator verification failed.");
+    try {
+      const expiresAt = unlockSshAdmin(config.sshAdminUnlockPath, minutes);
+      console.log(`Admin SSH unlocked until ${new Date(expiresAt * 1000).toISOString()}.`);
+    } finally {
+      spawnSync("/usr/bin/sudo", ["-k"], { stdio: "ignore" });
+    }
+    return;
+  }
+
+  throw new Error("Usage: devspace ssh <admin-status|unlock-admin [--minutes 1..15]|lock-admin>");
+}
+
 function printHelp(): void {
   console.log(
     [
@@ -393,6 +519,9 @@ function printHelp(): void {
       "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
       "  devspace agents show <id>",
       "  devspace agents daemon <status|stop|logs>",
+      "  devspace ssh admin-status",
+      "  devspace ssh unlock-admin [--minutes 1..15]",
+      "  devspace ssh lock-admin",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",

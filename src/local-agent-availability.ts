@@ -4,6 +4,7 @@ import {
   LOCAL_AGENT_PROVIDERS,
   type LocalAgentProvider,
 } from "./local-agent-profiles.js";
+import { resolveCodexCommand } from "./local-agent-codex.js";
 
 export interface LocalAgentProviderAvailability {
   name: LocalAgentProvider;
@@ -83,13 +84,19 @@ function packageAvailability(
 }
 
 function codexAvailability(env: NodeJS.ProcessEnv): LocalAgentProviderAvailability {
-  const availability = commandAvailability("codex", env.CODEX_COMMAND ?? "codex", env);
-  return availability.available
-    ? {
-        ...availability,
-        note: "available",
-      }
-    : availability;
+  const command = resolveCodexCommand(env);
+  if (!command) {
+    return {
+      name: "codex",
+      available: false,
+      reason: `${env.CODEX_COMMAND ?? "codex"} executable not found`,
+    };
+  }
+  return {
+    name: "codex",
+    available: true,
+    note: command.version ? `available ${command.version}` : "available",
+  };
 }
 
 function commandAvailability(

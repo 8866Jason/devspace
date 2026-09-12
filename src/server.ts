@@ -40,10 +40,12 @@ import {
   grepFilesTool,
   listDirectoryTool,
   readFileTool,
+  readManyFilesTool,
   runShellTool,
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import { runSshTool } from "./ssh-tool.js";
 import {
   McpSessionRegistry,
   type McpSessionCloseResult,
@@ -84,7 +86,19 @@ const EDIT_TOOL_ANNOTATIONS = {
   idempotentHint: false,
   openWorldHint: false,
 };
+const MOVE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
 const SHELL_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+const SSH_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
   destructiveHint: true,
   idempotentHint: false,
@@ -122,7 +136,9 @@ type ToolWidgetKind =
   | "edit"
   | "search"
   | "directory"
+  | "move"
   | "shell"
+  | "ssh"
   | "show_changes";
 
 interface ToolDefinitionMeta extends Record<string, unknown> {
@@ -170,12 +186,16 @@ function toolWidgetDescriptorMeta(
 const toolNames = {
   openWorkspace: "open_workspace",
   read: "read",
+  readMany: "read_many",
   write: "write",
   edit: "edit",
+  move: "move",
+  relocateWorkspace: "relocate_workspace",
   grep: "grep",
   glob: "glob",
   ls: "ls",
   shell: "bash",
+  ssh: "ssh",
 } as const;
 
 const workspaceIdDescription =
@@ -203,7 +223,7 @@ function serverInstructions(config: ServerConfig): string {
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, ${toolNames.readMany} when several related files are needed, apply_patch for normal file modifications, ${toolNames.move} for an explicit same-workspace move, ${toolNames.relocateWorkspace} for verified whole-workspace copy/move, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.ssh} only for explicitly requested remote work on a configured host alias. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -216,7 +236,7 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Use ${toolNames.readMany} when several related files are needed. Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, ${toolNames.move} for explicit same-workspace moves, ${toolNames.relocateWorkspace} for verified whole-workspace copy/move, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Use ${toolNames.ssh} only for explicitly requested remote work on a configured host alias. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -614,6 +634,7 @@ function registerCodexProcessTools(
         command: cmd,
         cwd,
         workspaceRoot: workspace.root,
+        sandbox: config.shellSandbox,
         tty,
         columns,
         rows,
@@ -1055,6 +1076,69 @@ export function createMcpServer(
     },
   );
 
+  registerAppTool(
+    server,
+    toolNames.readMany,
+    {
+      title: "Read multiple files",
+      description:
+        "Read several files from an open workspace in one call. Use this when a task needs multiple related files; paths are relative to the workspace root.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        files: z
+          .array(z.object({
+            path: z.string().describe("File path relative to the workspace root, or an advertised skill path."),
+            offset: z.number().int().positive().optional(),
+            limit: z.number().int().positive().optional(),
+          }))
+          .min(1)
+          .max(64),
+      },
+      outputSchema: resultOutputSchema({ files: z.number() }),
+      _meta: {},
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, files }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const resolvedFiles = files.map((file) => {
+        const readPath = workspaces.resolveReadPath(workspace, file.path);
+        workspaces.markReadPathLoaded(workspace, readPath);
+        return {
+          ...file,
+          path: readPath.absolutePath,
+          readRoots: readPath.readRoots,
+          displayPath: file.path,
+        };
+      });
+      const response = await readManyFilesTool(
+        { files: resolvedFiles },
+        { cwd: workspace.root, root: workspace.root },
+      );
+      if (response.isError) {
+        logFailedToolResponse(config, {
+          tool: toolNames.readMany,
+          workspaceId,
+        }, response.content, startedAt);
+        return response;
+      }
+
+      logToolCall(config, {
+        tool: toolNames.readMany,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        ...response,
+        structuredContent: {
+          result: contentText(response.content),
+          files: files.length,
+        },
+      };
+    },
+  );
+
   if (config.toolMode !== "codex") {
   registerAppTool(
     server,
@@ -1079,8 +1163,8 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await writeFileTool(input, {
+      const safePath = workspaces.resolveMutationPath(workspace, input.path);
+      const response = await writeFileTool({ ...input, path: safePath }, {
         cwd: workspace.root,
         root: workspace.root,
       });
@@ -1166,8 +1250,8 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await editFileTool(input, {
+      const safePath = workspaces.resolveMutationPath(workspace, input.path);
+      const response = await editFileTool({ ...input, path: safePath }, {
         cwd: workspace.root,
         root: workspace.root,
       });
@@ -1220,6 +1304,159 @@ export function createMcpServer(
     },
   );
   }
+
+  registerAppTool(
+    server,
+    toolNames.move,
+    {
+      title: "Move",
+      description:
+        "Move or rename one regular file or directory inside an open workspace. The destination must not already exist; .git, DevSpace credential/state paths, symlinks, and paths outside the workspace are rejected.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        source: z.string().describe("Existing file or directory path relative to the workspace root."),
+        destination: z.string().describe("New path relative to the workspace root. Must not already exist."),
+      },
+      outputSchema: resultOutputSchema({
+        status: z.literal("moved"),
+        source: z.string(),
+        destination: z.string(),
+        kind: z.enum(["file", "directory"]),
+      }),
+      ...toolWidgetDescriptorMeta(config, "move"),
+      annotations: MOVE_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, source, destination }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      try {
+        const moved = await workspaces.movePath(workspace, source, destination);
+        const message = `Moved ${moved.source} -> ${moved.destination}.`;
+        const content = [textBlock(message)];
+        logToolCall(config, {
+          tool: toolNames.move,
+          workspaceId,
+          path: moved.destination,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content,
+          _meta: {
+            tool: toolNames.move,
+            card: {
+              workspaceId,
+              path: moved.destination,
+              previousPath: moved.source,
+              summary: moved,
+              payload: { content },
+            },
+          },
+          structuredContent: {
+            status: "moved" as const,
+            source: moved.source,
+            destination: moved.destination,
+            kind: moved.kind,
+            result: message,
+          },
+        };
+      } catch (error) {
+        const content = [textBlock(error instanceof Error ? error.message : String(error))];
+        logFailedToolResponse(config, {
+          tool: toolNames.move,
+          workspaceId,
+          path: destination,
+        }, content, startedAt);
+        return { content, isError: true };
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.relocateWorkspace,
+    {
+      title: "Relocate workspace",
+      description:
+        "Copy or finalize-move the complete open workspace to a destination under a configured allowed root, including another disk. The copied tree is verified before optional source removal. The destination parent must already exist.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        destination: z.string().describe("Absolute or leading-tilde destination directory under an allowed root."),
+        removeSource: z.boolean().optional().default(false),
+        startDdev: z.boolean().optional().default(false),
+      },
+      outputSchema: resultOutputSchema({
+        status: z.literal("relocated"),
+        workspaceId: z.string(),
+        targetWorkspaceId: z.string().optional(),
+        source: z.string(),
+        destination: z.string(),
+        files: z.number(),
+        directories: z.number(),
+        symlinks: z.number(),
+        bytes: z.number(),
+        removedSource: z.boolean(),
+        copyMethod: z.enum(["ditto", "fs.cp", "verified-existing"]),
+        ddevDetected: z.boolean(),
+        ddevStarted: z.boolean(),
+        ddevOutput: z.string().optional(),
+      }),
+      _meta: {},
+      annotations: MOVE_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, destination, removeSource, startDdev }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      try {
+        const relocated = await workspaces.relocateWorkspace(workspace, destination, {
+          removeSource,
+          startDdev,
+        });
+        const message = [
+          `Relocated workspace ${relocated.source} -> ${relocated.destination}.`,
+          `Verified ${relocated.files} files, ${relocated.directories} directories, ${relocated.symlinks} symlinks (${relocated.bytes} bytes).`,
+          relocated.removedSource
+            ? "Source removed after verification."
+            : "Source retained; set removeSource=true to remove it after a verified copy.",
+        ].join("\n");
+        logToolCall(config, {
+          tool: toolNames.relocateWorkspace,
+          workspaceId,
+          path: relocated.destination,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(message)],
+          structuredContent: {
+            status: "relocated" as const,
+            workspaceId: relocated.workspaceId,
+            targetWorkspaceId: relocated.targetWorkspaceId,
+            source: relocated.source,
+            destination: relocated.destination,
+            files: relocated.files,
+            directories: relocated.directories,
+            symlinks: relocated.symlinks,
+            bytes: relocated.bytes,
+            removedSource: relocated.removedSource,
+            copyMethod: relocated.copyMethod,
+            ddevDetected: relocated.ddevDetected,
+            ddevStarted: relocated.ddevStarted,
+            ddevOutput: relocated.ddevOutput,
+            result: message,
+          },
+        };
+      } catch (error) {
+        const content = [textBlock(error instanceof Error ? error.message : String(error))];
+        logFailedToolResponse(config, {
+          tool: toolNames.relocateWorkspace,
+          workspaceId,
+          path: destination,
+        }, content, startedAt);
+        return { content, isError: true };
+      }
+    },
+  );
 
   if (config.toolMode === "codex") {
     registerAppTool(
@@ -1607,6 +1844,7 @@ export function createMcpServer(
       const response = await runShellTool(input, {
         cwd,
         root: workspace.root,
+        sandbox: config.shellSandbox,
       });
 
       if (response.isError) {
@@ -1653,6 +1891,53 @@ export function createMcpServer(
     },
   );
   }
+
+  registerAppTool(
+    server,
+    toolNames.ssh,
+    {
+      title: "SSH",
+      description:
+        "Run a command on an explicitly configured SSH host alias. Arbitrary hostnames are rejected. This is powerful remote execution and should only be exposed behind strong authentication.",
+      inputSchema: {
+        host: z.string().describe("Configured SSH host name or alias."),
+        command: z.string().describe("Remote command to run over SSH."),
+        timeout: z.number().positive().max(300).optional().describe("Timeout in seconds. Defaults to 30, max 300."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "ssh"),
+      annotations: SSH_TOOL_ANNOTATIONS,
+    },
+    async (input) => {
+      const startedAt = performance.now();
+      const response = await runSshTool(input, config.sshHosts, {
+        adminPolicy: config.sshAdminPolicy,
+        adminUnlockPath: config.sshAdminUnlockPath,
+      });
+      if (response.isError) {
+        logFailedToolResponse(config, {
+          tool: toolNames.ssh,
+          command: input.command,
+          commandLength: input.command.length,
+        }, response.content, startedAt);
+        return response;
+      }
+
+      logToolCall(config, {
+        tool: toolNames.ssh,
+        command: input.command,
+        commandLength: input.command.length,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        ...response,
+        structuredContent: {
+          result: contentText(response.content),
+        },
+      };
+    },
+  );
 
   if (config.toolMode === "codex") {
     registerCodexProcessTools(server, config, workspaces, processSessions);

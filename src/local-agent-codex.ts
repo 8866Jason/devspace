@@ -38,7 +38,7 @@ export function codexCommandEnvironment(env: NodeJS.ProcessEnv = process.env): N
 export function resolveCodexCommand(env: NodeJS.ProcessEnv = process.env): ResolvedCodexCommand | undefined {
   const command = env.CODEX_COMMAND ?? "codex";
   const probeEnv = codexCommandEnvironment(env);
-  for (const candidate of commandCandidates(command, probeEnv)) {
+  for (const candidate of commandCandidates(command, probeEnv, env.CODEX_COMMAND === undefined)) {
     const result = spawnSync(candidate, ["--version"], {
       encoding: "utf8",
       env: probeEnv,
@@ -522,16 +522,23 @@ export function codexAppServerError(message: string, version?: string, stderr?: 
   ].filter(Boolean).join("\n"));
 }
 
-function commandCandidates(command: string, env: NodeJS.ProcessEnv): string[] {
+function commandCandidates(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  includeHomeFallbacks = false,
+): string[] {
   if (command.includes("/") || command.includes("\\") || /\.(?:cmd|bat|exe|com)$/i.test(command)) return [command];
-  const path = env.PATH;
-  if (!path) return [command];
   const extensions = process.platform === "win32"
     ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
     : [""];
-  return path.split(delimiter)
+  const candidates = (env.PATH ?? "")
+    .split(delimiter)
     .filter(Boolean)
     .flatMap((directory) => extensions.map((extension) => resolve(directory, `${command}${extension}`)));
+  if (includeHomeFallbacks && command === "codex" && process.platform !== "win32") {
+    candidates.push(join(homedir(), "bin", "codex"), join(homedir(), ".local", "bin", "codex"));
+  }
+  return Array.from(new Set(candidates.length > 0 ? candidates : [command]));
 }
 
 function usesWindowsCommandShell(command: string): boolean {

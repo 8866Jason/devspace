@@ -31,14 +31,18 @@ export type PiSessionLike = Pick<
   AgentSession,
   | "sessionId"
   | "messages"
-  | "modelRegistry"
   | "prompt"
   | "subscribe"
   | "setActiveToolsByName"
   | "setModel"
   | "setThinkingLevel"
   | "dispose"
->;
+> & {
+  modelRegistry: {
+    find(provider: string, modelId: string): unknown;
+    getAll?: () => unknown[];
+  };
+};
 
 export type PiSessionFactory = (
   context: LocalAgentRuntimeContext,
@@ -197,8 +201,8 @@ async function defaultPiSessionFactory(
   input: LocalAgentRunInput,
 ): Promise<PiSessionLike> {
   const {
-    AuthStorage,
     ModelRegistry,
+    ModelRuntime,
     SessionManager,
     DefaultResourceLoader,
     createAgentSession,
@@ -207,8 +211,11 @@ async function defaultPiSessionFactory(
   // DevSpace's agentDir is the compatibility directory used for instructions;
   // Pi keeps its own native auth, model, and session state under getAgentDir().
   const agentDir = getAgentDir();
-  const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-  const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: join(agentDir, "models.json"),
+  });
+  const modelRegistry = new ModelRegistry(modelRuntime);
   const sessionManager = await resolveSessionManager(SessionManager, input.workspaceRoot, input.providerSessionId);
   const model = input.model ? resolvePiModel(modelRegistry, input.model) : undefined;
   if (input.model && !model) {
@@ -232,8 +239,7 @@ async function defaultPiSessionFactory(
     const result = await createAgentSession({
       cwd: input.workspaceRoot,
       agentDir,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       sessionManager: sessionManager as never,
       resourceLoader,
       ...(model ? { model: model as never } : {}),
@@ -242,7 +248,13 @@ async function defaultPiSessionFactory(
       // broaden active tools without recreating the session.
       tools: [...PI_FULL_ACCESS_TOOLS],
     });
-    session = result.session;
+    Object.defineProperty(result.session, "modelRegistry", {
+      value: modelRegistry,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    session = result.session as unknown as PiSessionLike;
     await registerPiSandboxSession(session, input.workspaceRoot, modeRef, input.writeMode ?? "allowed");
     session.setActiveToolsByName([...piToolsForWriteMode(input.writeMode)]);
     return session;

@@ -22,6 +22,18 @@ export interface DevspaceUserConfig {
   artifactMaxFileBytes?: number;
   agentDir?: string;
   subagents?: StoredSubagentsConfig;
+  shellSandbox?: string | null;
+  workspaceAliases?: Record<string, string>;
+  sshAdminPolicy?: "direct" | "timed-unlock";
+  sshHosts?: Array<{
+    name: string;
+    aliases?: string[];
+    host: string;
+    user?: string;
+    port?: number;
+    identityFile?: string;
+    tier?: "standard" | "admin";
+  }>;
 }
 
 export interface DevspaceAuthConfig {

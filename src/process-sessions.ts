@@ -17,6 +17,7 @@ export interface StartCommandInput {
   command: string;
   cwd: string;
   workspaceRoot?: string;
+  sandbox?: string;
   tty?: boolean;
   columns?: number;
   rows?: number;
@@ -90,8 +91,9 @@ function terminalSize(value: number | undefined, fallback: number): number {
 function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
+  sandbox?: string;
 }): Record<string, string> {
-  return {
+  const environment: Record<string, string> = {
     ...Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),
@@ -105,6 +107,19 @@ function processEnvironment(input?: {
     LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
     ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
     ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
+  };
+  if (input?.sandbox) delete environment.SSH_AUTH_SOCK;
+  return environment;
+}
+
+export function sandboxProcessCommand(
+  sandbox: string,
+  cwd: string,
+  command: string,
+): { executable: string; args: string[] } {
+  return {
+    executable: "sbx",
+    args: ["exec", "-w", cwd, sandbox, "/bin/bash", "-lc", command],
   };
 }
 
@@ -325,17 +340,32 @@ export class ProcessSessionManager {
   private startPipe(session: ProcessSession, input: StartCommandInput): void {
     const shell = resolveShellCommand(input.command);
     const detached = process.platform !== "win32";
-    const child = spawn(input.command, {
-      cwd: input.cwd,
-      env: processEnvironment({
-        workspaceId: input.workspaceId,
-        workspaceRoot: input.workspaceRoot,
-      }),
-      stdio: "pipe",
-      windowsHide: true,
-      detached,
-      shell: shell.executable,
-    });
+    const sandboxCommand = input.sandbox
+      ? sandboxProcessCommand(input.sandbox, input.cwd, input.command)
+      : undefined;
+    const child = sandboxCommand
+      ? spawn(sandboxCommand.executable, sandboxCommand.args, {
+          cwd: input.cwd,
+          env: processEnvironment({
+            workspaceId: input.workspaceId,
+            workspaceRoot: input.workspaceRoot,
+            sandbox: input.sandbox,
+          }),
+          stdio: "pipe",
+          windowsHide: true,
+          detached,
+        })
+      : spawn(input.command, {
+          cwd: input.cwd,
+          env: processEnvironment({
+            workspaceId: input.workspaceId,
+            workspaceRoot: input.workspaceRoot,
+          }),
+          stdio: "pipe",
+          windowsHide: true,
+          detached,
+          shell: shell.executable,
+        });
 
     session.process = {
       write: (data) => child.stdin.write(data),
@@ -357,13 +387,20 @@ export class ProcessSessionManager {
     }
 
     const shell = resolveShellCommand(input.command);
+    const sandboxCommand = input.sandbox
+      ? sandboxProcessCommand(input.sandbox, input.cwd, input.command)
+      : undefined;
     let pty: import("node-pty").IPty;
     try {
-      pty = nodePty.spawn(shell.executable, shell.args, {
+      pty = nodePty.spawn(
+        sandboxCommand?.executable ?? shell.executable,
+        sandboxCommand?.args ?? shell.args,
+        {
         cwd: input.cwd,
         env: processEnvironment({
           workspaceId: input.workspaceId,
           workspaceRoot: input.workspaceRoot,
+          sandbox: input.sandbox,
         }),
         name: "xterm-256color",
         cols: session.columns,

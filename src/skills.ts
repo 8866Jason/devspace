@@ -37,6 +37,7 @@ export function effectiveSkillPaths(config: ServerConfig, cwd: string): string[]
   const defaultPathCandidates = [
     join(homedir(), ".agents", "skills"),
     resolve(cwd, ".agents", "skills"),
+    resolve(cwd, ".pi", "skills"),
     config.devspaceSkillsDir,
     join(config.agentDir, "skills"),
     config.subagents.enabled && !hasSubagentsSkill(config.devspaceSkillsDir)

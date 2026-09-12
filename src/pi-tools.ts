@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   createBashTool,
   createEditTool,
@@ -29,6 +30,11 @@ interface ToolContext {
   cwd: string;
   root: string;
   readRoots?: string[];
+  sandbox?: string;
+}
+
+export interface ReadManyToolInput {
+  files: Array<ReadToolInput & { readRoots?: string[]; displayPath?: string }>;
 }
 
 function toMcpContent(result: AgentToolResult<unknown>): McpContent[] {
@@ -77,6 +83,27 @@ export async function readFileTool(input: ReadToolInput, context: ToolContext): 
   }, context);
 }
 
+export async function readManyFilesTool(input: ReadManyToolInput, context: ToolContext): Promise<ToolResponse> {
+  const results = await Promise.all(input.files.map((file) => {
+    const { readRoots, displayPath: _displayPath, ...readInput } = file;
+    return readFileTool(readInput, { ...context, readRoots: readRoots ?? context.readRoots });
+  }));
+  const content: McpContent[] = [];
+  let hasError = false;
+
+  results.forEach((result, index) => {
+    const file = input.files[index];
+    content.push({ type: "text", text: `--- ${file?.displayPath ?? file?.path ?? "file"} ---` });
+    content.push(...result.content);
+    hasError ||= Boolean(result.isError);
+  });
+
+  return {
+    content,
+    isError: hasError || undefined,
+  };
+}
+
 export async function writeFileTool(input: WriteToolInput, context: ToolContext): Promise<ToolResponse> {
   const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
   const tool = createWriteTool(context.cwd);
@@ -119,11 +146,101 @@ export async function listDirectoryTool(input: LsToolInput, context: ToolContext
 }
 
 export async function runShellTool(input: BashToolInput, context: ToolContext): Promise<ToolResponse> {
-  const tool = createBashTool(context.cwd);
   const timeout = input.timeout === undefined ? 30 : Math.min(input.timeout, 300);
+  if (context.sandbox) return runSandboxShell(input.command, timeout, context.cwd, context.sandbox);
 
+  const tool = createBashTool(context.cwd);
   return runTool((params) => tool.execute("run_shell", params), {
     command: input.command,
     timeout,
   }, context);
+}
+
+const MAX_SANDBOX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+export function sandboxShellArgs(sandbox: string, cwd: string, command: string, timeoutSeconds: number): string[] {
+  return [
+    "exec",
+    "-w",
+    cwd,
+    sandbox,
+    "/usr/bin/timeout",
+    "--signal=TERM",
+    "--kill-after=2s",
+    `${timeoutSeconds}s`,
+    "/bin/bash",
+    "-lc",
+    command,
+  ];
+}
+
+export function sandboxShellEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const cleanEnv = { ...env };
+  delete cleanEnv.SSH_AUTH_SOCK;
+  return cleanEnv;
+}
+
+function runSandboxShell(
+  command: string,
+  timeoutSeconds: number,
+  cwd: string,
+  sandbox: string,
+): Promise<ToolResponse> {
+  return new Promise((resolvePromise) => {
+    const child = spawn("sbx", sandboxShellArgs(sandbox, cwd, command, timeoutSeconds), {
+      env: sandboxShellEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let settled = false;
+
+    const finish = (result: ToolResponse) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(result);
+    };
+    const append = (chunks: Buffer[], chunk: Buffer, current: number): number => {
+      const remaining = MAX_SANDBOX_OUTPUT_BYTES - current;
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      return current + chunk.byteLength;
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes = append(stdout, chunk, stdoutBytes);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes = append(stderr, chunk, stderrBytes);
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+    }, (timeoutSeconds + 5) * 1_000);
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      finish({ content: formatToolError(error), isError: true });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const parts: string[] = [];
+      const stdoutText = Buffer.concat(stdout).toString("utf8").trimEnd();
+      const stderrText = Buffer.concat(stderr).toString("utf8").trimEnd();
+      if (stdoutText) parts.push(stdoutText);
+      if (stdoutBytes > MAX_SANDBOX_OUTPUT_BYTES) parts.push(`[stdout truncated at ${MAX_SANDBOX_OUTPUT_BYTES} bytes]`);
+      if (stderrText) parts.push(`[stderr]\n${stderrText}`);
+      if (stderrBytes > MAX_SANDBOX_OUTPUT_BYTES) parts.push(`[stderr truncated at ${MAX_SANDBOX_OUTPUT_BYTES} bytes]`);
+      if (timedOut) parts.push("Sandbox command timed out.");
+      else if (code !== 0) parts.push(`Sandbox command exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}.`);
+      finish({
+        content: [{ type: "text", text: parts.join("\n\n") || "Sandbox command completed with no output." }],
+        isError: timedOut || code !== 0 || undefined,
+      });
+    });
+  });
 }

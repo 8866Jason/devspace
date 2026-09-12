@@ -19,6 +19,34 @@ import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
 
+test("Jason extension tools compose with upstream full and codex tool surfaces", async (t) => {
+  const full = await fixture(t, { toolMode: "full" });
+  const fullNames = (await full.client.listTools()).tools.map((tool) => tool.name);
+  for (const name of ["read_many", "move", "relocate_workspace", "ssh", "bash", "grep", "glob", "ls"]) {
+    assert.ok(fullNames.includes(name), `full mode exposes ${name}`);
+  }
+  assert.equal(fullNames.includes("apply_patch"), false);
+
+  const codex = await fixture(t, { toolMode: "codex" });
+  const codexNames = (await codex.client.listTools()).tools.map((tool) => tool.name);
+  for (const name of [
+    "open_workspace",
+    "read",
+    "read_many",
+    "move",
+    "relocate_workspace",
+    "ssh",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+  ]) {
+    assert.ok(codexNames.includes(name), `codex mode exposes ${name}`);
+  }
+  for (const hidden of ["write", "edit", "bash", "grep", "glob", "ls"]) {
+    assert.equal(codexNames.includes(hidden), false, `codex mode hides ${hidden}`);
+  }
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const providerNote = "available";
   const context = await fixture(t, {
@@ -247,6 +275,7 @@ async function fixture(
     git?: boolean;
     localAgentProviders?: LocalAgentProviderAvailability[] | (() => LocalAgentProviderAvailability[]);
     subagents?: SubagentsConfig;
+    toolMode?: "minimal" | "full" | "codex";
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -285,7 +314,7 @@ async function fixture(
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
     DEVSPACE_WIDGETS: "full",
-    DEVSPACE_TOOL_MODE: "full",
+    DEVSPACE_TOOL_MODE: options.toolMode ?? "full",
     DEVSPACE_SUBAGENTS: options.localAgentProviders ? "1" : "0",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",

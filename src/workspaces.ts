@@ -5,7 +5,7 @@ import type {
   WorkspaceMode,
   WorkspaceStore,
 } from "./workspace-store.js";
-import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, opendir, readFile, realpath, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
@@ -13,6 +13,7 @@ import { createManagedWorktree } from "./git-worktrees.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
+  expandHomePath,
   isPathInsideRoot,
   resolveAllowedPath,
 } from "./roots.js";
@@ -27,6 +28,7 @@ import {
   loadLocalAgentProfiles,
   type LocalAgentProfile,
 } from "./local-agent-profiles.js";
+import { transferWorkspace, type WorkspaceTransferResult } from "./workspace-transfer.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -72,6 +74,17 @@ export interface WorkspaceReadPath {
   skillRead?: SkillReadResolution;
 }
 
+export interface WorkspaceMoveResult {
+  source: string;
+  destination: string;
+  kind: "file" | "directory";
+}
+
+export interface WorkspaceRelocateResult extends WorkspaceTransferResult {
+  workspaceId: string;
+  targetWorkspaceId?: string;
+}
+
 export interface OpenWorkspaceInput {
   path: string;
   mode?: WorkspaceMode;
@@ -101,7 +114,9 @@ export class WorkspaceRegistry {
     input: string | OpenWorkspaceInput,
     openOptions: OpenWorkspaceOptions = {},
   ): Promise<WorkspaceContext> {
-    const workspaceInput = typeof input === "string" ? { path: input } : input;
+    const workspaceInput = typeof input === "string"
+      ? { path: this.resolveWorkspacePath(input) }
+      : { ...input, path: this.resolveWorkspacePath(input.path) };
     const conversationScopeId = openOptions.conversationScopeId;
     if (!conversationScopeId || !this.store) {
       return this.openNewWorkspace(workspaceInput);
@@ -242,6 +257,136 @@ export class WorkspaceRegistry {
     };
   }
 
+  async movePath(
+    workspace: Workspace,
+    sourceInput: string,
+    destinationInput: string,
+  ): Promise<WorkspaceMoveResult> {
+    const source = this.resolvePath(workspace, sourceInput);
+    const destination = this.resolvePath(workspace, destinationInput);
+    this.assertMutationPathAllowed(workspace, source, sourceInput);
+    this.assertMutationPathAllowed(workspace, destination, destinationInput);
+
+    const canonicalRoot = await realpath(workspace.root);
+    const sourceStats = await lstat(source).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Source does not exist: ${sourceInput}`);
+      }
+      throw error;
+    });
+    if (sourceStats.isSymbolicLink()) {
+      throw new AccessDeniedError(`Moving symlinks is not supported: ${sourceInput}`);
+    }
+    if (!sourceStats.isFile() && !sourceStats.isDirectory()) {
+      throw new Error(`Source must be a regular file or directory: ${sourceInput}`);
+    }
+
+    const canonicalSource = await realpath(source);
+    if (!isPathInsideRoot(canonicalSource, canonicalRoot)) {
+      throw new AccessDeniedError(`Source resolves outside the workspace root: ${sourceInput}`);
+    }
+    if (this.protectedRuntimePaths().some((path) => isPathInsideRoot(path, canonicalSource))) {
+      throw new AccessDeniedError(`Moving a path that contains DevSpace credentials is not allowed: ${sourceInput}`);
+    }
+
+    const destinationExists = await lstat(destination)
+      .then(() => true)
+      .catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      });
+    if (destinationExists) throw new Error(`Destination already exists: ${destinationInput}`);
+
+    const canonicalDestinationParent = await realpath(dirname(destination)).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Destination parent does not exist: ${destinationInput}`);
+      }
+      throw error;
+    });
+    const destinationParentStats = await stat(canonicalDestinationParent);
+    if (!destinationParentStats.isDirectory()) {
+      throw new Error(`Destination parent is not a directory: ${destinationInput}`);
+    }
+    if (!isPathInsideRoot(canonicalDestinationParent, canonicalRoot)) {
+      throw new AccessDeniedError(`Destination resolves outside the workspace root: ${destinationInput}`);
+    }
+
+    const canonicalDestination = resolve(canonicalDestinationParent, basename(destination));
+    if (sourceStats.isDirectory() && isPathInsideRoot(canonicalDestination, canonicalSource)) {
+      throw new Error(`Destination cannot be inside the source directory: ${destinationInput}`);
+    }
+
+    await rename(source, destination);
+    await lstat(source).then(
+      () => { throw new Error(`Move verification failed; source still exists: ${sourceInput}`); },
+      (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      },
+    );
+    await lstat(destination);
+
+    return {
+      source: sourceInput,
+      destination: destinationInput,
+      kind: sourceStats.isDirectory() ? "directory" : "file",
+    };
+  }
+
+  async relocateWorkspace(
+    workspace: Workspace,
+    destinationInput: string,
+    options: { removeSource: boolean; startDdev: boolean },
+  ): Promise<WorkspaceRelocateResult> {
+    const source = await realpath(workspace.root);
+    const destination = resolve(expandHomePath(destinationInput));
+    assertAllowedPath(destination, this.config.allowedRoots);
+    if (isPathInsideRoot(destination, source)) {
+      throw new Error("Destination cannot be inside the source workspace.");
+    }
+    if (this.protectedRuntimePaths().some((path) => isPathInsideRoot(path, source))) {
+      throw new AccessDeniedError("A workspace containing DevSpace credentials cannot be relocated.");
+    }
+
+    const canonicalDestinationParent = await realpath(dirname(destination)).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Destination parent does not exist: ${dirname(destination)}`);
+      }
+      throw error;
+    });
+    const canonicalAllowedRoots = await Promise.all(
+      this.config.allowedRoots.map((root) => realpath(resolve(root)).catch(() => undefined)),
+    );
+    if (!canonicalAllowedRoots.some((root) => root && isPathInsideRoot(canonicalDestinationParent, root))) {
+      throw new AccessDeniedError("Destination parent resolves outside configured allowed roots.");
+    }
+
+    const transfer = await transferWorkspace({
+      source,
+      destination,
+      removeSource: options.removeSource,
+      startDdev: options.startDdev,
+    });
+
+    let targetWorkspaceId: string | undefined;
+    if (options.removeSource) {
+      workspace.root = destination;
+      const loadedSkills = this.loadSkillsForWorkspace(destination);
+      workspace.skills = loadedSkills.skills;
+      workspace.skillDiagnostics = loadedSkills.skillDiagnostics;
+      workspace.agentProfiles = await loadLocalAgentProfiles(this.config, destination);
+      workspace.activatedSkillDirs = new Set();
+      this.store?.updateRoot(workspace.id, destination);
+    } else {
+      targetWorkspaceId = (await this.openNewWorkspace({ path: destination })).workspace.id;
+    }
+
+    return {
+      ...transfer,
+      workspaceId: workspace.id,
+      targetWorkspaceId,
+    };
+  }
+
   getWorkspace(workspaceId: string): Workspace {
     const workspace = this.workspaces.get(workspaceId);
     if (workspace) {
@@ -288,7 +433,14 @@ export class WorkspaceRegistry {
     if (!isPathInsideRoot(absolutePath, workspace.root)) {
       throw new Error(`Path is outside workspace root: ${inputPath}`);
     }
+    this.assertNotProtectedRuntimePath(absolutePath, inputPath);
 
+    return absolutePath;
+  }
+
+  resolveMutationPath(workspace: Workspace, inputPath: string): string {
+    const absolutePath = this.resolvePath(workspace, inputPath);
+    this.assertMutationPathAllowed(workspace, absolutePath, inputPath);
     return absolutePath;
   }
 
@@ -321,8 +473,47 @@ export class WorkspaceRegistry {
   }
 
   resolveWorkingDirectory(workspace: Workspace, workingDirectory: string | undefined): string {
+    this.assertShellAllowed(workspace);
     const directory = workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
     return assertAllowedPath(directory, [workspace.root]);
+  }
+
+  private resolveWorkspacePath(inputPath: string): string {
+    const requested = inputPath.trim();
+    const alias = requested.startsWith("@") ? requested.slice(1) : requested;
+    return this.config.workspaceAliases[alias] ?? requested;
+  }
+
+  private assertMutationPathAllowed(workspace: Workspace, absolutePath: string, inputPath: string): void {
+    if (isPathInsideRoot(absolutePath, join(workspace.root, ".git"))) {
+      throw new AccessDeniedError(`Protected Git metadata cannot be modified: ${inputPath}`);
+    }
+    this.assertNotProtectedRuntimePath(absolutePath, inputPath);
+  }
+
+  private assertNotProtectedRuntimePath(absolutePath: string, inputPath: string): void {
+    const resolvedPath = resolve(absolutePath);
+    if (!this.protectedRuntimePaths().some((path) => isPathInsideRoot(resolvedPath, path))) return;
+    throw new AccessDeniedError(`Protected DevSpace credential/state path cannot be accessed: ${inputPath}`);
+  }
+
+  private assertShellAllowed(workspace: Workspace): void {
+    if (this.config.dangerouslyAllowShellInCredentialRoots) return;
+    const root = resolve(workspace.root);
+    const containsProtectedRuntime = this.protectedRuntimePaths().some((path) => isPathInsideRoot(path, root));
+    if (!containsProtectedRuntime) return;
+    throw new AccessDeniedError(
+      "Shell is disabled in workspaces that contain DevSpace credential/state files. Open a narrower workspace instead.",
+    );
+  }
+
+  private protectedRuntimePaths(): string[] {
+    const configDir = dirname(this.config.sshAdminUnlockPath);
+    return Array.from(new Set([
+      resolve(configDir, "auth.json"),
+      resolve(this.config.sshAdminUnlockPath),
+      resolve(this.config.stateDir),
+    ]));
   }
 
   private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {

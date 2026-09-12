@@ -10,7 +10,7 @@ import {
   assert.equal(availability.name, "codex");
   assert.equal(typeof availability.available, "boolean");
   if (availability.available) {
-    assert.equal(availability.note, "available");
+    assert.match(availability.note ?? "", /^available(?:\s|$)/);
   }
 }
 

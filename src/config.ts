@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
+import { normalizeSshHosts, type SshAdminPolicy, type SshHostConfig } from "./ssh-tool.js";
 import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
 import { resolveSubagentsConfig, type SubagentsConfig } from "./local-agent-config.js";
 
@@ -31,6 +32,12 @@ export interface ServerConfig {
   devspaceAgentsDir: string;
   subagents: SubagentsConfig;
   agentDir: string;
+  workspaceAliases: Record<string, string>;
+  shellSandbox?: string;
+  sshHosts: SshHostConfig[];
+  sshAdminPolicy: SshAdminPolicy;
+  sshAdminUnlockPath: string;
+  dangerouslyAllowShellInCredentialRoots: boolean;
   logging: LoggingConfig;
 }
 
@@ -117,6 +124,36 @@ function parsePathList(value: string | undefined): string[] {
       .map((entry) => entry.trim())
       .filter(Boolean) ?? []
   );
+}
+
+function parseWorkspaceAliases(value: Record<string, string> | undefined): Record<string, string> {
+  if (!value) return {};
+
+  return Object.fromEntries(Object.entries(value).map(([alias, path]) => {
+    const normalizedAlias = alias.trim();
+    const normalizedPath = path.trim();
+    if (!normalizedAlias) throw new Error("Workspace alias must not be empty.");
+    if (!normalizedPath) throw new Error(`Workspace alias ${normalizedAlias} must define a path.`);
+    if (!/^[A-Za-z0-9._-]+$/.test(normalizedAlias)) {
+      throw new Error(`Invalid workspace alias: ${normalizedAlias}`);
+    }
+    return [normalizedAlias, resolve(expandHomePath(normalizedPath))];
+  }));
+}
+
+function parseShellSandbox(value: string | undefined): string | undefined {
+  const name = value?.trim();
+  if (!name) return undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(name)) {
+    throw new Error(`Invalid DEVSPACE_SHELL_SANDBOX: ${value}`);
+  }
+  return name;
+}
+
+function parseSshAdminPolicy(value: string | undefined): SshAdminPolicy {
+  if (!value || value === "direct") return "direct";
+  if (value === "timed-unlock") return value;
+  throw new Error(`Invalid sshAdminPolicy: ${value}`);
 }
 
 function parseStringList(value: string | undefined, fallback: string[]): string[] {
@@ -250,6 +287,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     devspaceAgentsDir: devspaceAgentsDir(env),
     subagents: resolveSubagentsConfig(files.config.subagents, env),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    workspaceAliases: parseWorkspaceAliases(files.config.workspaceAliases),
+    shellSandbox:
+      files.config.shellSandbox === null
+        ? undefined
+        : parseShellSandbox(files.config.shellSandbox ?? env.DEVSPACE_SHELL_SANDBOX),
+    sshHosts: normalizeSshHosts(files.config.sshHosts ?? []),
+    sshAdminPolicy: parseSshAdminPolicy(files.config.sshAdminPolicy),
+    sshAdminUnlockPath: join(files.dir, "ssh-admin-unlock.json"),
+    dangerouslyAllowShellInCredentialRoots: parseBoolean(
+      env.DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS,
+    ),
     logging: parseLoggingConfig(env),
   };
 }

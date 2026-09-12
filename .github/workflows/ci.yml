@@ -50,6 +50,9 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      - name: Secret scan
+        run: npm run check:secrets
+
       - name: Typecheck
         run: npm run typecheck
 

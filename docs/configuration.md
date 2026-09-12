@@ -24,6 +24,9 @@ npx @waishnav/devspace serve
 npx @waishnav/devspace doctor
 npx @waishnav/devspace config get
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
+npx @waishnav/devspace ssh admin-status
+npx @waishnav/devspace ssh unlock-admin --minutes 15
+npx @waishnav/devspace ssh lock-admin
 ```
 
 ## Core Environment Variables
@@ -38,6 +41,8 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
+| `DEVSPACE_SHELL_SANDBOX` | Optional existing Docker Sandbox microVM name. When set, `bash` and Codex-mode `exec_command` run through `sbx exec`; the host SSH agent socket is not forwarded. |
+| `DEVSPACE_DANGEROUSLY_ALLOW_SHELL_IN_CREDENTIAL_ROOTS` | Owner-only escape hatch for broad workspaces containing DevSpace credential/state paths. Defaults to off. |
 
 ## Native Artifact Download
 
@@ -95,9 +100,9 @@ MCP clients discover metadata from:
 
 | Value | Behavior |
 | --- | --- |
-| `minimal` | Default. Exposes `open_workspace`, `read`, `write`, `edit`, and `bash`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
+| `minimal` | Default. Exposes `open_workspace`, `read`, `read_many`, `write`, `edit`, `move`, `relocate_workspace`, `bash`, and `ssh`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
 | `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
-| `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
+| `codex` | Experimental. Exposes `open_workspace`, `read`, `read_many`, `move`, `relocate_workspace`, `ssh`, `apply_patch`, `exec_command`, and `write_stdin`. Direct `write`, `edit`, and `bash` remain hidden. |
 
 `DEVSPACE_MINIMAL_TOOLS` remains a backward-compatible alias when
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
@@ -107,7 +112,15 @@ its fixed short tool names regardless of `DEVSPACE_TOOL_NAMING`.
 Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
 `node-pty` dependency; `write_stdin` can send input, poll output, and resize PTY
-sessions.
+sessions. When `DEVSPACE_SHELL_SANDBOX` is configured, both pipe and PTY process
+sessions are launched through that sandbox.
+
+`read_many` accepts up to 64 files per call. `move` performs no-overwrite
+same-workspace file or directory renames and rejects `.git`, credential/state,
+symlink, and out-of-workspace paths. `relocate_workspace` copies a complete
+workspace across allowed roots or disks, verifies the copied tree and file
+contents, and removes the source only when explicitly requested after
+verification.
 
 ## Widgets
 
@@ -132,6 +145,7 @@ DevSpace discovers standard Agent Skills from:
 
 - `~/.agents/skills`
 - project `.agents/skills`
+- project `.pi/skills`
 - `~/.devspace/skills`
 
 It also keeps compatibility with:
@@ -216,7 +230,9 @@ npx skills add Waishnav/devspace --skill subagents --global
 Starter profile templates are available under `examples/agents/`. Copy or adapt
 them into one of the active profile directories before use.
 
-Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
+Project `.pi/skills` is loaded automatically for backward compatibility. Other
+legacy or organization-specific skill roots can be added through
+`DEVSPACE_SKILL_PATHS` when needed.
 
 Example:
 
@@ -224,6 +240,62 @@ Example:
 DEVSPACE_SKILL_PATHS="$HOME/.claude/skills,$HOME/company/skills" \
 npx @waishnav/devspace serve
 ```
+
+## Workspace aliases
+
+Persist short workspace aliases in `~/.devspace/config.json`:
+
+```json
+{
+  "workspaceAliases": {
+    "demo": "~/Projects/example-site"
+  }
+}
+```
+
+`open_workspace` accepts either `@demo` or `demo` and resolves it before normal
+allowed-root, checkout/worktree, and conversation-reuse handling.
+
+## SSH hosts
+
+SSH is opt-in and allowlisted. Configure only host metadata and local key paths;
+never paste private-key contents, passwords, OAuth tokens, or other credentials
+into `config.json`, source files, tests, Git commits, or pull requests.
+
+```json
+{
+  "sshAdminPolicy": "timed-unlock",
+  "sshHosts": [
+    {
+      "name": "prod-web",
+      "aliases": ["production"],
+      "host": "example.com",
+      "user": "deploy",
+      "port": 22,
+      "identityFile": "~/.ssh/id_ed25519_example",
+      "tier": "admin"
+    }
+  ]
+}
+```
+
+The `ssh` MCP tool accepts only configured names or aliases and rejects arbitrary
+hosts. It uses OpenSSH with batch authentication. Keep passphrases in the system
+SSH agent or Keychain instead of DevSpace configuration. With
+`sshAdminPolicy: "timed-unlock"`, admin-tier aliases additionally require a
+short local unlock performed interactively with `devspace ssh unlock-admin`.
+The unlock record is owner-local state and must never be committed.
+
+While the server is running, changes to `sshHosts` in `config.json` are validated
+and hot-reloaded. An invalid edit keeps the last known-good host list.
+
+## Secret hygiene
+
+`npm run check:secrets` scans tracked and unignored files without printing any
+matched secret value. CI runs this check on every pull request. DevSpace also
+ignores common local auth/token/private-key filenames. `auth.json`, SQLite state,
+SSH private keys, temporary passwords, and admin-unlock state belong outside the
+repository.
 
 ## Logging
 

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { HeadTailBuffer, ProcessSessionManager } from "./process-sessions.js";
+import { HeadTailBuffer, ProcessSessionManager, sandboxProcessCommand } from "./process-sessions.js";
+
+assert.deepEqual(
+  sandboxProcessCommand("devspace-coding", "/workspace/project", "npm test"),
+  {
+    executable: "sbx",
+    args: ["exec", "-w", "/workspace/project", "devspace-coding", "/bin/bash", "-lc", "npm test"],
+  },
+);
 
 const smallBuffer = new HeadTailBuffer(100);
 smallBuffer.append("hello\n");

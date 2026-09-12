@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -136,6 +136,80 @@ test("workspace paths outside the allowed roots are rejected", async (t) => {
     () => context.registry.openWorkspace(context.outsideRoot),
     /outside allowed roots/,
   );
+});
+
+test("workspace aliases resolve before normal workspace handling", async (t) => {
+  const context = await fixture(t);
+  const aliasConfig = loadConfig({
+    DEVSPACE_CONFIG_DIR: context.outsideRoot,
+    DEVSPACE_ALLOWED_ROOTS: context.root,
+    DEVSPACE_WORKTREE_ROOT: join(context.root, ".devspace", "alias-worktrees"),
+    DEVSPACE_AGENT_DIR: context.agentDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    PORT: "1",
+  });
+  aliasConfig.workspaceAliases = { demo: context.root };
+  const registry = new WorkspaceRegistry(aliasConfig);
+
+  const opened = await registry.openWorkspace("@demo");
+  assert.equal(opened.workspace.root, context.root);
+});
+
+test("movePath renames files without overwrite and protects Git metadata", async (t) => {
+  const context = await fixture(t);
+  const opened = await context.registry.openWorkspace(context.root);
+  await writeFile(join(context.root, "move-me.txt"), "move me\n");
+
+  const moved = await context.registry.movePath(opened.workspace, "move-me.txt", "moved.txt");
+  assert.deepEqual(moved, {
+    source: "move-me.txt",
+    destination: "moved.txt",
+    kind: "file",
+  });
+  await assert.rejects(() => stat(join(context.root, "move-me.txt")), /ENOENT/);
+  assert.equal((await stat(join(context.root, "moved.txt"))).isFile(), true);
+
+  await mkdir(join(context.root, ".git"), { recursive: true });
+  await writeFile(join(context.root, ".git", "protected"), "metadata\n");
+  await assert.rejects(
+    () => context.registry.movePath(opened.workspace, ".git/protected", "protected"),
+    /Protected Git metadata/,
+  );
+});
+
+test("relocateWorkspace verifies a copy before exposing the destination workspace", async (t) => {
+  const context = await fixture(t);
+  const source = join(context.root, "relocate-source");
+  const destination = join(context.root, "relocate-destination");
+  await mkdir(source);
+  await writeFile(join(source, "file.txt"), "verified copy\n");
+
+  const isolatedConfigDir = join(context.outsideRoot, "config");
+  const isolatedStateDir = join(context.outsideRoot, "state");
+  await mkdir(isolatedConfigDir, { recursive: true });
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: isolatedConfigDir,
+    DEVSPACE_ALLOWED_ROOTS: context.root,
+    DEVSPACE_STATE_DIR: isolatedStateDir,
+    DEVSPACE_WORKTREE_ROOT: join(context.root, ".devspace", "relocate-worktrees"),
+    DEVSPACE_AGENT_DIR: context.agentDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    PORT: "1",
+  });
+  const registry = new WorkspaceRegistry(config);
+  const opened = await registry.openWorkspace(source);
+
+  const result = await registry.relocateWorkspace(opened.workspace, destination, {
+    removeSource: false,
+    startDdev: false,
+  });
+  assert.equal(result.source, await realpath(source));
+  assert.equal(result.destination, destination);
+  assert.equal(result.removedSource, false);
+  assert.ok(result.files >= 1);
+  assert.match(result.targetWorkspaceId ?? "", /^ws_/);
+  assert.equal((await stat(join(destination, "file.txt"))).isFile(), true);
+  assert.equal((await stat(source)).isDirectory(), true);
 });
 
 test("a symlinked allowed root preserves checkout and worktree path behavior", { skip: platform() === "win32" }, async (t) => {
