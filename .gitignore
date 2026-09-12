@@ -11,8 +11,9 @@ releases/
 **/ssh-admin-unlock.json
 **/oauth-clients.json
 **/oauth-refresh-tokens.json
-**/.bluehost-account-pass.tmp
-**/.bluehost-root-pass.tmp
+**/.devspace-credential-*.tmp
+**/.devspace-secret-*.tmp
+**/*-password.tmp
 *.pem
 *.p12
 *.pfx
