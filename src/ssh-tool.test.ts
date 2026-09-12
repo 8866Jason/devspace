@@ -29,7 +29,10 @@ assert.equal(normalized[0]?.user, "deploy");
 assert.equal(normalized[0]?.port, 2222);
 assert.equal(resolveSshHost("PROD-WEB", normalized)?.name, "prod-web_1");
 assert.equal(resolveSshHost("production", normalized)?.name, "prod-web_1");
-assert.match(normalized[0]?.identityFile ?? "", /\.ssh\/id_ed25519_test_fixture$/);
+assert.equal(
+  (normalized[0]?.identityFile ?? "").endsWith(join(".ssh", "id_ed25519_test_fixture")),
+  true,
+);
 
 const admin = normalizeSshHosts([
   { name: "prod-root", host: "root.example.com", user: "root", tier: "admin" },
